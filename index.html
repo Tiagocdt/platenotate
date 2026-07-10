@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medaka annotator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">🐟 <b>Annotator</b></div>
+  <label class="tb">Plate
+    <select id="plateSelect" title="Choose a processed plate folder"></select>
+  </label>
+  <button id="filterBtn" class="btn" title="Filter wells across ALL plates">🔎 Filter</button>
+  <button id="clearFilterBtn" class="btn ghost" title="Back to single plate" hidden>✕ filter</button>
+  <label class="tb">Annotator
+    <input id="annotator" type="text" placeholder="your name" size="10">
+  </label>
+  <span class="grow"></span>
+  <button id="undoBtn" class="btn" title="Undo (z)" disabled>↶ Undo</button>
+  <button id="redoBtn" class="btn" title="Redo (Shift+Z)" disabled>↷ Redo</button>
+  <button id="saveBtn" class="btn" title="Save now (s)">Save</button>
+  <span id="saveStatus" class="status">—</span>
+  <button id="helpBtn" class="btn ghost" title="Keyboard & help">?</button>
+</header>
+
+<main id="app">
+  <!-- LEFT: overview grid -->
+  <section id="left">
+    <div class="leftbar">
+      <button id="pagePrev" class="btn sm" title="Previous page">‹</button>
+      <span id="pageLabel" class="muted">—</span>
+      <button id="pageNext" class="btn sm" title="Next page">›</button>
+      <span class="sep"></span>
+      <label class="mini">per page
+        <select id="perPage">
+          <option>96</option><option>48</option><option>24</option><option>12</option>
+        </select>
+      </label>
+      <span class="sep"></span>
+      <label class="mini">grid
+        <select id="gridChannel"><option>BF</option><option>FL</option></select>
+      </label>
+      <label class="mini" title="Move all thumbnails to a point in development">frame
+        <input id="gridFrac" type="range" min="0" max="100" value="50">
+      </label>
+      <span class="grow"></span>
+      <input id="blockInput" class="block" type="text" placeholder="type block e.g. A01:D12, cols 1-6"
+             title="Select a block of wells by typing, then Enter">
+    </div>
+    <div id="gridWrap">
+      <div id="grid"></div>
+      <div id="rubber" hidden></div>
+    </div>
+    <div class="leftfoot muted" id="selInfo">no wells selected</div>
+  </section>
+
+  <!-- RIGHT: detail + annotation panel -->
+  <section id="right">
+    <div id="detail">
+      <div class="detailhead">
+        <b id="detailWell">—</b>
+        <span class="chToggle">
+          <button class="btn sm chBtn" data-ch="BF">BF</button>
+          <button class="btn sm chBtn" data-ch="FL">FL</button>
+        </span>
+        <span class="grow"></span>
+        <span id="frameInfo" class="muted">—</span>
+      </div>
+      <div id="stage">
+        <img id="bigImg" alt="selected well frame" draggable="false">
+      </div>
+      <div class="scrubrow">
+        <button id="playBtn" class="btn sm" title="Play / pause (space)">▶</button>
+        <div id="scrubWrap">
+          <input id="scrub" type="range" min="0" max="0" value="0">
+          <div id="rangeBar" hidden></div>
+          <div id="rhStart" class="rhandle" hidden title="drag: range start"></div>
+          <div id="rhEnd" class="rhandle" hidden title="drag: range end"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="panel">
+      <div class="tabs">
+        <button class="tab active" data-scope="well">Well</button>
+        <button class="tab" data-scope="plate">Plate</button>
+        <button class="tab" data-scope="image">Image</button>
+      </div>
+      <div id="panelBody"><!-- rendered by app.js --></div>
+    </div>
+  </section>
+</main>
+
+<div id="help" hidden>
+  <div class="card">
+    <button id="helpClose" class="btn ghost close">✕</button>
+    <h3>How this works</h3>
+    <p>Three annotation levels share one idea — every field is a <b>column</b> you
+       define, with a type: <i>categorical</i>, <i>binary</i>, <i>range</i>, or
+       <i>free text</i>. Nothing is hard-coded; the medaka fields are just
+       suggestions you can accept, edit, or ignore.</p>
+    <ul>
+      <li><b>Well</b> (main): tag wells. Rubber-band drag or click to select, then
+          click a value to assign it to every selected well. <b>+ column</b> makes a
+          new one; <b>binary</b> columns carry a default.</li>
+      <li><b>Plate</b>: whole-folder fields — temperature, date, start time, notes.
+          Click <i>Autofill</i> to pull them from the plate metadata.</li>
+      <li><b>Image / stage</b>: enable it, scrub the trajectory, and stamp a frame
+          with an Iwamatsu stage (or any image-level column). Saved per timepoint.</li>
+    </ul>
+    <h4>Keyboard</h4>
+    <table class="keys">
+      <tr><td>1–9</td><td>assign the active column's Nth value to the selection</td></tr>
+      <tr><td>Tab</td><td>next active column &nbsp;·&nbsp; ←→↑↓ move well</td></tr>
+      <tr><td>Space</td><td>play / pause &nbsp;·&nbsp; [ ] step one frame</td></tr>
+      <tr><td>c</td><td>toggle BF / FL &nbsp;·&nbsp; Backspace clear active column</td></tr>
+      <tr><td>z / Shift+Z</td><td>undo / redo &nbsp;·&nbsp; s save now</td></tr>
+    </table>
+    <p class="muted">Everything autosaves to
+       <code>screening_&lt;plate&gt;.json</code> next to the crops.</p>
+  </div>
+</div>
+
+<div id="filterModal" hidden>
+  <div class="card">
+    <button id="filterClose" class="btn ghost close">✕</button>
+    <h3>Filter wells across all plates</h3>
+    <p class="muted">Keep only wells matching ALL of these, from every plate. The
+       matches replace the grid (labelled by plate), sorted by how many annotations
+       each already has — then annotate them further (e.g. Iwamatsu stages).</p>
+    <div id="filterRows"></div>
+    <div class="inline" style="margin-top:8px">
+      <button id="filterAddRow" class="btn sm">+ constraint</button>
+      <span class="grow"></span>
+      <span id="filterCount" class="muted"></span>
+      <button id="filterExport" class="btn" title="download the matching plate+well ids as JSON (for well_hyperstack.py)">⬇ Export JSON</button>
+      <button id="filterApply" class="btn primary">Apply</button>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

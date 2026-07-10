@@ -1,0 +1,31 @@
+{
+  "_note": "Seed columns offered as add-able SUGGESTIONS in the app, per scope. Nothing here is hard-coded into the engine: every column is user-defined, and these are just convenient starting points for the medaka workflow. Edit freely — remove what you don't use, add your own. The cross-plate registry (annotation_schema.json) also feeds suggestions and grows as you annotate. Column types: categorical | binary | range | free.",
+
+  "plate": {
+    "columns": {
+      "incubation_temp_c": {"type": "free",  "hint": "e.g. 26 / 28 / 22.6 - autofilled from the frames' median temp_C when available"},
+      "date":              {"type": "free",  "hint": "acquisition date, autofilled from plate_metadata"},
+      "start_time":        {"type": "free",  "hint": "imaging start time, autofilled from the first frame timestamp"},
+      "annotator":         {"type": "free",  "hint": "who tagged this plate"},
+      "notes":             {"type": "free",  "hint": "anything worth recording about the whole plate"}
+    }
+  },
+
+  "well": {
+    "columns": {
+      "mixture":           {"type": "categorical", "values": [], "hint": "injection mixture (e.g. oca2_ctrl, ctbp1_g1) - a build_db 'mix' key"},
+      "viability":         {"type": "binary", "values": ["alive", "dead"], "default": null},
+      "injection_quality": {"type": "binary", "values": ["good", "bad"], "default": null, "hint": "pre-screen; the real readout is mGOLD intensity later"},
+      "line":              {"type": "categorical", "values": []},
+      "valid_frames":      {"type": "range", "values": [], "hint": "the good timepoint window on the trajectory (drag on the scrubber)"},
+      "empty":             {"type": "binary", "values": ["true", "false"], "default": "false", "hint": "empty well - defaults to false unless toggled"}
+    }
+  },
+
+  "image": {
+    "columns": {
+      "iwamatsu_stage":    {"type": "categorical", "values": [], "from": "iwamatsu_stages.json", "fill": "forward", "hint": "Iwamatsu (2004) stage. KEYFRAME column: set a stage on a frame and it holds until the next frame you stage."},
+      "slice":             {"type": "categorical", "values": ["1", "2", "3", "4", "5"], "fill": "forward", "hint": "the relevant z-slice. KEYFRAME column: set a slice and it holds until the next slice change."}
+    }
+  }
+}
