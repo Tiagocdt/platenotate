@@ -50,7 +50,7 @@ SCOPES = ("plate", "well", "image")
 
 # The cross-plate recommendation registry (UNION of every column/value ever
 # used) — shared with the legacy screen.py so suggestions carry across tools.
-DEFAULT_REGISTRY_PATH = Path.home() / "MedakaNet" / "annotation_schema.json"
+DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent / "annotation_schema.json"
 # Registry key used for each scope's column bucket. "columns" (no prefix) is the
 # well scope, matching the existing registry written by screen.py.
 _REG_KEY = {"plate": "plate_columns", "well": "columns", "image": "image_columns"}
@@ -372,7 +372,9 @@ def _plate_autofill(plate_dir: Path) -> dict:
     SUGGESTION the annotator confirms; missing sources -> empty fields."""
     out = {"date": "", "start_time": "", "incubation_temp_c": "",
            "line": "", "guide": "", "assay": "", "timepoint_interval_min": ""}
-    meta_p = plate_dir / "plate_metadata.json"
+    meta_p = plate_dir / "metadata" / "plate_metadata.json"
+    if not meta_p.exists():
+        meta_p = plate_dir / "plate_metadata.json"
     if meta_p.exists():
         try:
             m = json.load(open(meta_p))
@@ -388,7 +390,7 @@ def _plate_autofill(plate_dir: Path) -> dict:
         except (OSError, json.JSONDecodeError, ValueError):
             pass
     # median incubation temperature from the frame metadata (temp_C column)
-    csvs = sorted(plate_dir.glob("*_frame_metadata.csv"))
+    csvs = sorted((plate_dir / "metadata").glob("*_frame_metadata.csv")) or sorted(plate_dir.glob("*_frame_metadata.csv"))
     if csvs:
         try:
             import csv as _csv

@@ -163,6 +163,14 @@ def _nearest_tp(frames: dict, tp: int) -> int:
     return min(frames, key=lambda t: abs(t - tp))
 
 
+def _screening(plate_dir: Path) -> Path:
+    """Canonical screening JSON path: <plate>/metadata/screening_<plate>.json, with a
+    fallback to a legacy plate-root copy. Returns a Path (may not exist — used for saving)."""
+    cands = (sorted((plate_dir / "metadata").glob("screening_*.json"))
+             or sorted(plate_dir.glob("screening_*.json")))
+    return cands[0] if cands else plate_dir / "metadata" / f"screening_{plate_dir.name}.json"
+
+
 def _list_plates(data_root: Path) -> list:
     """Folders under data_root that look like a processed plate (or hold crops)."""
     out = []
@@ -173,9 +181,8 @@ def _list_plates(data_root: Path) -> list:
             continue
         if ((d / "bf").is_dir() or (d / "crops").is_dir()
                 or (d / "screening").is_dir()
-                or any(d.glob("screening_*.json"))):
-            n_tags = 1 if any(d.glob("screening_*.json")) else 0
-            out.append({"dir": d.name, "annotated": bool(n_tags)})
+                or _screening(d).exists()):
+            out.append({"dir": d.name, "annotated": _screening(d).exists()})
     return out
 
 
@@ -209,7 +216,8 @@ def _wells_all(data_root: Path) -> dict:
     for pd in sorted(Path(data_root).iterdir()):
         if not pd.is_dir() or not (pd / "bf").is_dir():
             continue
-        scr = sorted(pd.glob("screening_*.json"))
+        _s = _screening(pd)
+        scr = [_s] if _s.exists() else []
         short = _short_id(pd.name)
         if not scr:
             plates.append({"dir": pd.name, "short": short, "n_wells": 0})
@@ -351,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
         man = _manifest(self.data_root, dir_arg)
         plate_dir = Path(man["plate_dir"])
         plate_name = plate_dir.name
-        scr = plate_dir / f"screening_{plate_name}.json"
+        scr = _screening(plate_dir)
         self._send(200, _client_manifest(man, scr, plate_name))
 
     def _api_frame(self, q):
@@ -397,7 +405,8 @@ class Handler(BaseHTTPRequestHandler):
         man = _manifest(self.data_root, dir_arg)
         plate_dir = Path(man["plate_dir"])
         plate_name = plate_dir.name
-        scr = plate_dir / f"screening_{plate_name}.json"
+        scr = plate_dir / "metadata" / f"screening_{plate_name}.json"   # SAVE always into metadata/
+        scr.parent.mkdir(parents=True, exist_ok=True)
         clean = model.save_payload(scr, payload, plate_name)
         self._send(200, {"ok": True, "screening_file": str(scr),
                          "updated": clean["updated"], "payload": clean})

@@ -1,0 +1,213 @@
+{
+  "columns": {
+    "line": {
+      "type": "categorical",
+      "values": [
+        "cab",
+        "pfkfb3_her7v",
+        "Cab",
+        "PFKFB3-hom_Her7-Venus-hom-Cre-"
+      ]
+    },
+    "viability": {
+      "type": "binary",
+      "values": [
+        "alive",
+        "dead"
+      ]
+    },
+    "position_quality": {
+      "type": "binary",
+      "values": [
+        "good",
+        "bad"
+      ]
+    },
+    "mixture": {
+      "type": "categorical",
+      "values": [
+        "oca2_ctrl",
+        "ctbp1_ctbp1l_dKO",
+        "ctbp1_g1",
+        "Oca2",
+        "ctbp1-ctbp1l-dKO"
+      ]
+    },
+    "valid_frames": {
+      "type": "range",
+      "values": []
+    },
+    "phenotype": {
+      "type": "categorical",
+      "values": [
+        "dead",
+        "injected",
+        "wt",
+        "unsure",
+        "injected/bad",
+        "dead/bad",
+        "wt/bad"
+      ]
+    },
+    "injected?": {
+      "type": "binary",
+      "values": [
+        "Yes",
+        "No"
+      ]
+    },
+    "empty": {
+      "type": "binary",
+      "values": [
+        "true",
+        "false"
+      ]
+    },
+    "injection_quality": {
+      "type": "binary",
+      "values": [
+        "good",
+        "bad"
+      ]
+    },
+    "stinkt": {
+      "type": "binary",
+      "values": [
+        "true",
+        "false"
+      ]
+    },
+    "Favorites": {
+      "type": "binary",
+      "values": [
+        "true",
+        "false"
+      ]
+    },
+    "Favorite": {
+      "type": "binary",
+      "values": [
+        "true",
+        "false"
+      ]
+    }
+  },
+  "plate_columns": {
+    "incubation_temp_c": {
+      "type": "free",
+      "values": []
+    },
+    "date": {
+      "type": "free",
+      "values": []
+    },
+    "start_time": {
+      "type": "free",
+      "values": []
+    },
+    "annotator": {
+      "type": "free",
+      "values": []
+    },
+    "notes": {
+      "type": "free",
+      "values": []
+    },
+    "acq_px_size_nm": {
+      "type": "categorical",
+      "values": [
+        "1625.0"
+      ]
+    },
+    "acq_objective": {
+      "type": "categorical",
+      "values": [
+        "4x"
+      ]
+    },
+    "acq_project": {
+      "type": "categorical",
+      "values": [
+        "Medaka_ctbp2a_dKO_V01",
+        "Medaka_ctbp1_dKO_V01"
+      ]
+    },
+    "acq_plate_file": {
+      "type": "categorical",
+      "values": [
+        "96well-Greiner_TC",
+        "96well-Greiner-modified"
+      ]
+    },
+    "acq_script": {
+      "type": "categorical",
+      "values": [
+        "Medaka_ctbp2a_dKO_V01.imsf",
+        "Medaka_ctbp1_dKO_V01.imsf"
+      ]
+    }
+  },
+  "image_columns": {
+    "iwamatsu_stage": {
+      "type": "categorical",
+      "values": [
+        "st0",
+        "st1",
+        "st2",
+        "st3",
+        "st4",
+        "st5",
+        "st6",
+        "st7",
+        "st8",
+        "st9",
+        "st10",
+        "st11",
+        "st12",
+        "st13",
+        "st14",
+        "st15",
+        "st16",
+        "st17",
+        "st18",
+        "st19",
+        "st20",
+        "st21",
+        "st22",
+        "st23",
+        "st24",
+        "st25",
+        "st26",
+        "st27",
+        "st28",
+        "st29",
+        "st30",
+        "st31",
+        "st32",
+        "st33",
+        "st34",
+        "st35",
+        "st36",
+        "st37",
+        "st38",
+        "st39",
+        "st40",
+        "st41",
+        "st42",
+        "st43",
+        "st44",
+        "st45"
+      ]
+    },
+    "slice": {
+      "type": "categorical",
+      "values": [
+        "3",
+        "4",
+        "1",
+        "2",
+        "5"
+      ]
+    }
+  }
+}
