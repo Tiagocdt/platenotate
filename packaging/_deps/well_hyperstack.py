@@ -707,6 +707,11 @@ def main():
     ap.add_argument("--all-slices", action="store_true",
                     help="movie: one mp4 per z-slice + FL (per well)")
     ap.add_argument("--per-well", action="store_true", help="one output per WELL, not a montage")
+    ap.add_argument("--z-mode", default="all", choices=["all", "maxproj", "focus", "slice"],
+                    help="TIF: keep every z-slice (default), or collapse Z to a max "
+                         "projection / the annotated focus track / the --slice plane")
+    ap.add_argument("--rotate", action="store_true",
+                    help="TIF: turn every plane by the annotated rotation track")
     ap.add_argument("--grid", help="force montage layout ROWSxCOLS, e.g. 2x2")
     ap.add_argument("--gap", type=int, default=6, help="black pixels between montage tiles")
     ap.add_argument("--out", help="output file (single TIF) or directory (movies)")
@@ -727,17 +732,25 @@ def main():
             sys.exit("give: <plate> <well> [<well> …]   (or --from-json FILE)")
         by_plate = {a.plate: a.wells}
 
+    # KEYWORDS, not positions: both builders have optional args (channels/slices,
+    # tp window, z_mode/rotate) between `gap` and the roots, so a positional call
+    # silently lands --data-root in tp_start and dies on the first comparison.
     for plate, wells in by_plate.items():
         if a.movie:
-            build_video(plate, wells, a.out, a.fps, a.slice_z, a.fl, a.all_slices,
-                        a.grid, a.gap, a.per_well, a.data_root, a.smb_root)
+            build_video(plate, wells, out_dir=a.out, fps=a.fps, slice_z=a.slice_z, fl=a.fl,
+                        all_slices=a.all_slices, grid=a.grid, gap=a.gap, per_well=a.per_well,
+                        data_root=a.data_root, smb_root=a.smb_root)
         elif a.per_well:
             flat = [w for tok in wells for w in str(tok).replace(",", " ").split()]
             for w in flat:
-                build_hyperstack(plate, [w], None, a.grid, a.gap, a.data_root, a.smb_root)
+                build_hyperstack(plate, [w], grid=a.grid, gap=a.gap, z_mode=a.z_mode,
+                                 rotate=a.rotate, slices=([a.slice_z] if a.slice_z else None),
+                                 data_root=a.data_root, smb_root=a.smb_root)
         else:
             out = a.out if (not a.from_json) else None
-            build_hyperstack(plate, wells, out, a.grid, a.gap, a.data_root, a.smb_root)
+            build_hyperstack(plate, wells, out=out, grid=a.grid, gap=a.gap, z_mode=a.z_mode,
+                             rotate=a.rotate, slices=([a.slice_z] if a.slice_z else None),
+                             data_root=a.data_root, smb_root=a.smb_root)
 
 
 if __name__ == "__main__":

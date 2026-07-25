@@ -4,6 +4,18 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.1.2] — 2026-07-25
+
+### Fixed — `well_hyperstack.py`'s command line was broken
+
+Both builders were called with POSITIONAL arguments, but each has optional parameters
+(`channels`/`slices`, the timepoint window, and now `z_mode`/`rotate`) sitting between
+`gap` and the data roots — so `--data-root` landed in `tp_start` and any CLI run died
+with `'>=' not supported between instances of 'int' and 'str'`. Now called by keyword.
+The app was never affected; it has always used keyword arguments.
+
+Also exposed on the CLI: `--z-mode all|maxproj|focus|slice` and `--rotate`.
+
 ## [1.1.1] — 2026-07-25
 
 ### Fixed — dated plate folders found no annotations in the database
