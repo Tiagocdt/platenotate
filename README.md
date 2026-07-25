@@ -1,119 +1,144 @@
-# annotation_app — web-based image annotator (replaces `screen.py`)
+# PlateNotate
 
-A tiny, self-contained web tool for annotating the processed plates at three
-levels — **plate**, **well**, and **image/frame** — with a real GUI (buttons,
-dropdowns, rubber-band multi-select, a trajectory fader). It writes a
-`screening_<plate>.json` (schema **v3**) that `twinnet_clean/tools/build_db.py`
-ingests into `medaka.db`.
+**Annotate plate-based microscopy time-lapses — plate, well and frame — then export
+exactly what you annotated as a movie, montage or TIF hyperstack.**
 
-It is **general-purpose**: every field at every level is a *column you define*
-(type `categorical | binary | range | free`). Nothing about medaka is hard-wired
-— the medaka fields (temperature, mixture, viability, Iwamatsu stage, …) are just
-editable **suggestions**, so the same tool works for any plate/well/frame
-annotation task.
+PlateNotate is a small local web app (Python standard library + Pillow, no framework,
+no build step) for screening plates of embryos, organoids, colonies — anything imaged
+well-by-well over time. Every field is a **column you define**, so nothing about any
+one organism is hard-wired; the medaka fields it ships with are just editable
+suggestions.
 
 ```
-segment  →  ANNOTATE (this tool)  →  build (medaka.db)
+segment  →  ANNOTATE (this tool)  →  export / analyse
 ```
 
-## Run it
+## Install & run
 
 ```bash
-conda activate twinnet                 # provides Pillow/numpy (the only needs)
-cd ~/MedakaNet
-python annotation_app/server.py                 # opens a browser; pick a plate
-python annotation_app/server.py AQV04            # open focused on a plate (prefix ok)
-python annotation_app/server.py --data-root DIR --port 8765 --no-browser
+git clone https://github.com/Tiagocdt/platenotate.git
+cd platenotate
+pip install -r requirements-desktop.txt      # Pillow, numpy, tifffile + optional extras
+python server.py --data-root /path/to/your/plates
 ```
 
-No build step, no `npm`, no framework, no extra `pip install` — a stdlib HTTP
-server plus Pillow (already in the `twinnet` env). To let another annotator use
-it, run it on a shared machine and give them the URL, or they clone the repo and
-run the same command.
+Then open <http://127.0.0.1:8765/>. Or run it as a **native desktop window** with
+`python desktop.py` (needs `pywebview`), or on macOS double-click `run_app.command`.
+`./run.sh` is the everyday launcher: it self-updates (fast-forward only), stops any
+previous instance, and opens the browser. Building a transferable `.app` / `.exe` for
+collaborators is documented in [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
-## The three levels (one idea, three scopes)
+Nothing leaves your machine — it's a loopback server over your own files.
 
-| Level | Keyed by | Examples (seed suggestions) |
-|-------|----------|------------------------------|
-| **Plate** | whole folder | `incubation_temp_c`, `date`, `start_time`, `annotator`, `notes` — **Autofill** pulls these from `plate_metadata.json` + the frames' median `temp_C` |
-| **Well** (main) | `well` | `mixture`, `viability` (binary), `injection_quality` (binary), `line`, `valid_frames` (range) |
-| **Image** | `(well, timepoint)` | `iwamatsu_stage` (Iwamatsu 2004) + `slice` — **keyframe / forward-fill** columns (see below) |
+## What your data should look like
 
-Column types: **categorical** (open value set) · **binary** (two values + a
-default) · **range** (`[start,end]` over timepoints, e.g. `valid_frames`) ·
-**free** (text/number).
+Layout discovery is deliberately forgiving. Any of these work:
+
+| Layout | Shape |
+|---|---|
+| per-channel (current) | `<plate>/<channel>/<well>/SL0N/*_LO<tp>_<CH>_SL0N.tif` |
+| legacy v2 | `<plate>/bf/<well>/SL0N/…` + `<plate>/fl/<well>/…` |
+| legacy v1 | `<plate>/screening/…` or `<plate>/crops/…` |
+| flat | a bare folder of images — one "well" per image |
+
+Timepoints are parsed from `_LO<NNN>_`, z-slices from `SL0N`, channels from the folder
+name (`plate_metadata.json` names the detection channel if present). Any number of
+channels is supported end-to-end — the viewer, the grid, and every export.
+
+## The three scopes
+
+| Scope | Keyed by | Examples |
+|---|---|---|
+| **Plate** | the folder | `incubation_temp_c`, `date`, `annotator`, `notes` — **Autofill** reads the plate metadata |
+| **Well** | `well` | `mixture`, `viability` (binary), `line`, `valid_frames` (range) |
+| **Image** | `(well, timepoint)` | developmental `stage`, `slice` (focus), `rotation`, measurements |
+
+Column types: **categorical** · **binary** (two values + a default) · **range** (a span
+over timepoints) · **angle** · **free**. Image columns are **keyframed**: set a value on
+one frame and it holds until the next frame you set — only the boundaries are stored.
 
 ## What you can do
 
-- **Grid** (left): thumbnails of every well; **rubber-band drag** or click to
-  select; the badge shows the *active* column's value. Pagination + per-page for
-  non-96 / multi-plate sets. A `grid`/`frame` control moves all thumbnails to a
-  point in development.
-- **Detail** (upper right): the selected well's big image, **BF/FL toggle**, and
-  a **scrubber/fader** through its trajectory (play/pause, `[`/`]`).
-- **Annotation panel** (lower right): create columns/values entirely in the GUI;
-  click a value to assign it to **all selected wells**; binary columns carry a
-  **default** (and a one-click *fill unset → default*); set a `valid_frames`
-  **range by dragging** the handles on the scrubber; suggestion chips surface
-  columns/values used on other plates.
-- **Image tab — keyframe staging & slice**: `iwamatsu_stage` and `slice` are
-  *forward-fill* columns. Set a stage on a frame and it **holds until the next
-  frame you stage** (only the boundaries are stored). Clicking a value that a
-  frame already shows **re-anchors** that run's start to the current frame
-  (earlier *or* later); clicking on the boundary frame **toggles it off**. The
-  keyframe strip lists the boundaries (jump / ✕). `slice` works the same and
-  allows a slice to recur.
-- **Cross-plate filter** (🔎 Filter): filter wells across **all** plates by
-  AND constraints (e.g. `injected?=Yes` · `viability=alive` · `line=…`); the
-  matches replace the grid, labelled by plate and **sorted by #annotations**;
-  click one to load its plate and annotate it (Image tab). **⬇ Export JSON**
-  downloads `wells_filter.json` (`{by_plate:{plate:[wells]}, …}`) — feed it to
-  `tools/well_hyperstack.py --from-json wells_filter.json` (add `--per-well`
-  for one hyperstack per well).
-- **Undo/redo**, an **annotator** field, and **autosave** on every change.
+- **Grid** — every well as a thumbnail; rubber-band or click to select; a frame fader
+  moves the whole plate through development.
+- **Detail** — the selected well large, channel toggles, a scrubber through its
+  trajectory, plus **z** and **rot** faders that record focus / rotation keyframes.
+- **Measure** — drag a line on the image; it's stored in µm using the plate's pixel size.
+- **Filter across plates** — pick any subset of plates and AND together annotation and
+  **measurement** constraints (e.g. *egg_diameter above 1400 µm at every timepoint it was
+  measured*), then save the filter by name.
+- **Export** — TIF hyperstack or MP4, one file per well or a tiled montage, with a
+  **Render** block that decides what each frame actually shows (below).
+- Undo/redo, autosave, keyboard-first operation (`?` in Settings lists the keys).
 
-Keyboard: `1–9` assign the active column's Nth value · `Tab` next column ·
-`←→↑↓` move well · `Space` play/pause · `c` BF/FL · `Backspace` clear · `z` /
-`Shift+Z` undo/redo · `s` save. (`?` in the top bar shows this.)
+## Render: the export shows what you annotated
 
-## Output — `screening_<plate>.json` (v3)
+Every export option maps to something you set in the app:
 
-The **well-level** `columns` + `annotations` keep the exact v2 shape, so
-`build_db.py` ingests a v3 file unchanged; the plate/image levels are additive.
+| Option | Effect |
+|---|---|
+| **plane per channel** | max projection · **annotated focus track** · one slice · middle slice |
+| **apply rotation** | turns every frame by your `rotation` keyframes — smoothstep, shortest way round the circle, exactly as the viewer previews it |
+| **overlay channels** | composites the selected channels into one colour movie (screen blend) instead of one file each |
+| **colour** | per channel: gray, inverted, a tint (green/magenta/cyan/amber/…) or any matplotlib colormap |
+| **labels** | burn well · plate · stage · timepoint & elapsed time · angle · z · any well annotation, plus a **scale bar** in real µm, onto every tile |
+| **TIF z-mode** | keep every slice, or collapse Z to a max projection / the focus track / one slice |
+
+A TIF hyperstack is data, so nothing is ever burned into it — labels are an MP4 option
+only. If a track you asked for doesn't exist for a well, the export **degrades and tells
+you** (in the job's notes) rather than failing: no focus keyframes → a fixed best-focus
+slice; no rotation keyframes → 0°.
+
+Exports run as background jobs with a progress dock, and survive closing the dialog.
+
+## Output
+
+Annotations live in a SQLite database (`medaka.db` by default) and are mirrored to CSV
+and a `screening_<plate>.json` (schema v3) — pick the formats in Settings.
 
 ```json
-{ "schema_version": 3, "plate": "...", "annotator": "...", "created": "...", "updated": "...",
-  "plate_columns": { "incubation_temp_c": {"type":"free"} },
-  "plate_annotations": { "incubation_temp_c": "26" },
-  "columns":     { "mixture": {"type":"categorical","values":["oca2_ctrl","ctbp1_g1"]},
-                   "valid_frames": {"type":"range","values":[]} },
-  "annotations": { "A01": {"mixture":"oca2_ctrl","valid_frames":[30,169]} },
-  "image_columns":     { "iwamatsu_stage": {"type":"categorical","values":["st1", "..."]} },
-  "image_annotations": { "A01": { "168": {"iwamatsu_stage":"st24"} } } }
+{ "schema_version": 3, "plate": "…", "annotator": "…",
+  "plate_columns": {…}, "plate_annotations": {…},
+  "columns": { "mixture": {"type":"categorical","values":["ctrl","ko"]} },
+  "annotations": { "A01": {"mixture":"ctrl","valid_frames":[30,169]} },
+  "image_columns": {…},
+  "image_annotations": { "A01": { "168": {"stage":"st24","slice":"3","rotation":-37.5} } } }
 ```
 
-`build_db.py` reads the well level (EAV `well_annotation`) and, from v3, also
-fills `plate_annotation` and `image_annotation`. Re-ingest is idempotent:
-`python twinnet_clean/tools/build_db.py ingest --plate <folder>`.
+## Layout
 
-## Files
+| Path | What |
+|---|---|
+| `server.py` | stdlib HTTP backend: layout discovery, TIFF→PNG, JSON API, atomic save |
+| `model.py` | data model: three scopes, v0→v3 migration, well/frame discovery |
+| `db_store.py` | the SQLite store (the source of truth) |
+| `export.py` | background TIF/MP4 export jobs |
+| `version.py`, `VERSION` | version + the fast-forward self-update |
+| `index.html`, `static/` | the GUI (vanilla JS, no build) — `rot_tool.js` / `measure_tool.js` are plugins |
+| `packaging/` | PyInstaller recipe + the vendored engine modules a standalone clone needs |
+| `tests/` | `js_harness.mjs` (headless GUI), `compose_test.py` (render engine), `db_roundtrip_test.py` |
+| `docs/` | desktop packaging, the image-tool plugin API, and design history |
 
-| File | What |
-|------|------|
-| `server.py` | stdlib HTTP backend: layout discovery, TIFF→PNG (Pillow, cached), JSON API, atomic save |
-| `model.py` | pure-stdlib data model: 3-scope columns, v0/v1/v2→v3 migration, registry, well/frame discovery |
-| `index.html`, `static/app.js`, `static/style.css` | the GUI (vanilla JS, no build) |
-| `iwamatsu_stages.json` | canonical Iwamatsu (2004) stage list (source noted inside) — **editable** |
-| `defaults.json` | per-scope seed column suggestions — **editable** |
+The frame composer, hyperstack builder and focus-track renderer live in
+`packaging/_deps/` (vendored from the sibling `hyperstack_video/` tool in the author's
+full imaging tree, so this repo runs standalone).
 
-## Notes & adaptability
+## Tests
 
-- **Layout discovery** is robust: v2 (`bf/<well>/SL0N/` + `fl/<well>/`), legacy v1
-  (`screening/` or `crops/`), and a **flat** fallback (a bare folder of images,
-  one "well" per image) — timepoints are parsed from `_LO<NNN>_`, z from `SL0N`.
-  If multiple z-slices exist, the middle slice is shown.
-- Suggestions accumulate in the shared registry
-  `~/MedakaNet/annotation_schema.json` (the same one `screen.py` uses).
-- The Iwamatsu list was transcribed from a public reproduction of Iwamatsu
-  (2004); **verify against the paper** before publishing, and edit
-  `iwamatsu_stages.json` freely.
+```bash
+node tests/js_harness.mjs        # 102 headless GUI assertions, no browser
+python tests/compose_test.py     # 29 render-engine assertions, no image data
+python tests/db_roundtrip_test.py
+```
+
+## Adapting it to your experiment
+
+- `defaults.json` — the seed columns offered per scope. Edit freely.
+- `iwamatsu_stages.json` — the developmental stage list (medaka, Iwamatsu 2004,
+  transcribed from a public reproduction — **verify against the paper before
+  publishing**). Replace it with your own staging series.
+- Suggestions accumulate in `annotation_schema.json` as you work.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).

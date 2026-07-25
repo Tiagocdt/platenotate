@@ -1,3 +1,17 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# packaging build output
+build/
+dist/
+dist_notate/
+*.spec.bak
+
+# local data / annotations that must never be committed
+*.db
+*.db-wal
+*.db-shm
+*.bak
+*.bak_*
+screening_*.json

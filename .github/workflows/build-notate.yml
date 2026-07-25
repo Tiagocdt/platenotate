@@ -1,0 +1,38 @@
+name: Build PlateNotate
+on:
+  workflow_dispatch:          # run manually from the Actions tab
+  push:
+    tags: ["v*"]              # …or on a version tag (v1.0.0)
+
+# NOTE: this workflow expects the repo to contain packaging/_deps/ (the vendored sibling
+# modules — commit them via `python packaging/gather_deps.py`). Set `working-directory`
+# below if the annotator isn't at the repo root.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: python -m pip install -r requirements-desktop.txt pyinstaller
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean packaging/notate.spec
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: cd dist && zip -qry PlateNotate-macOS.zip PlateNotate.app
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/PlateNotate/* -DestinationPath dist/PlateNotate-Windows.zip
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: cd dist && tar czf PlateNotate-Linux.tar.gz PlateNotate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlateNotate-${{ runner.os }}
+          path: dist/PlateNotate-*

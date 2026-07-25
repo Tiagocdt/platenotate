@@ -4,9 +4,7 @@
       "type": "categorical",
       "values": [
         "cab",
-        "pfkfb3_her7v",
-        "Cab",
-        "PFKFB3-hom_Her7-Venus-hom-Cre-"
+        "pfkfb3_her7v"
       ]
     },
     "viability": {
@@ -16,51 +14,11 @@
         "dead"
       ]
     },
-    "position_quality": {
-      "type": "binary",
-      "values": [
-        "good",
-        "bad"
-      ]
-    },
-    "mixture": {
-      "type": "categorical",
-      "values": [
-        "oca2_ctrl",
-        "ctbp1_ctbp1l_dKO",
-        "ctbp1_g1",
-        "Oca2",
-        "ctbp1-ctbp1l-dKO"
-      ]
-    },
-    "valid_frames": {
-      "type": "range",
-      "values": []
-    },
-    "phenotype": {
-      "type": "categorical",
-      "values": [
-        "dead",
-        "injected",
-        "wt",
-        "unsure",
-        "injected/bad",
-        "dead/bad",
-        "wt/bad"
-      ]
-    },
     "injected?": {
       "type": "binary",
       "values": [
         "Yes",
         "No"
-      ]
-    },
-    "empty": {
-      "type": "binary",
-      "values": [
-        "true",
-        "false"
       ]
     },
     "injection_quality": {
@@ -70,21 +28,45 @@
         "bad"
       ]
     },
-    "stinkt": {
+    "position_quality": {
+      "type": "binary",
+      "values": [
+        "good",
+        "bad"
+      ]
+    },
+    "empty": {
       "type": "binary",
       "values": [
         "true",
         "false"
       ]
     },
-    "Favorites": {
-      "type": "binary",
+    "mixture": {
+      "type": "categorical",
       "values": [
-        "true",
-        "false"
+        "oca2_ctrl",
+        "ctbp1_ctbp1l_dKO",
+        "ctbp1_g1"
       ]
     },
-    "Favorite": {
+    "phenotype": {
+      "type": "categorical",
+      "values": [
+        "wt",
+        "injected",
+        "dead",
+        "unsure",
+        "wt/bad",
+        "injected/bad",
+        "dead/bad"
+      ]
+    },
+    "valid_frames": {
+      "type": "range",
+      "values": []
+    },
+    "favorite": {
       "type": "binary",
       "values": [
         "true",
@@ -114,37 +96,24 @@
       "values": []
     },
     "acq_px_size_nm": {
-      "type": "categorical",
-      "values": [
-        "1625.0"
-      ]
+      "type": "free",
+      "values": []
     },
     "acq_objective": {
-      "type": "categorical",
-      "values": [
-        "4x"
-      ]
-    },
-    "acq_project": {
-      "type": "categorical",
-      "values": [
-        "Medaka_ctbp2a_dKO_V01",
-        "Medaka_ctbp1_dKO_V01"
-      ]
+      "type": "free",
+      "values": []
     },
     "acq_plate_file": {
-      "type": "categorical",
-      "values": [
-        "96well-Greiner_TC",
-        "96well-Greiner-modified"
-      ]
+      "type": "free",
+      "values": []
+    },
+    "acq_project": {
+      "type": "free",
+      "values": []
     },
     "acq_script": {
-      "type": "categorical",
-      "values": [
-        "Medaka_ctbp2a_dKO_V01.imsf",
-        "Medaka_ctbp1_dKO_V01.imsf"
-      ]
+      "type": "free",
+      "values": []
     }
   },
   "image_columns": {
@@ -202,12 +171,20 @@
     "slice": {
       "type": "categorical",
       "values": [
-        "3",
-        "4",
         "1",
         "2",
+        "3",
+        "4",
         "5"
       ]
+    },
+    "rotation": {
+      "type": "angle",
+      "values": []
+    },
+    "measure test": {
+      "type": "measurement",
+      "values": []
     }
   }
 }

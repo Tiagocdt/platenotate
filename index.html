@@ -3,27 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Medaka annotator</title>
+<title>PlateNotate</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header id="topbar">
-  <div class="brand">🐟 <b>Annotator</b></div>
+  <div class="brand">✎ <b>PlateNotate</b><span id="verChip" class="ver" title="Version — click for details and updates"></span></div>
   <label class="tb">Plate
     <select id="plateSelect" title="Choose a processed plate folder"></select>
   </label>
+  <button id="openFolderBtn" class="btn ghost" title="Open a folder of image data (on this computer or a network share)">📂 Open</button>
   <button id="filterBtn" class="btn" title="Filter wells across ALL plates">🔎 Filter</button>
   <button id="clearFilterBtn" class="btn ghost" title="Back to single plate" hidden>✕ filter</button>
+  <button id="tifBtn" class="btn" title="Export the selected wells as a TIF hyperstack">⤓ TIF</button>
+  <button id="mp4Btn" class="btn" title="Export the selected wells as an MP4 movie">⤓ MP4</button>
   <label class="tb">Annotator
-    <input id="annotator" type="text" placeholder="your name" size="10">
+    <input id="annotator" type="text" placeholder="your name" size="10" list="annotatorList"
+           title="Who you're saving as (press Enter to set). Not a filter — all annotations show regardless.">
+    <datalist id="annotatorList"></datalist>
   </label>
   <span class="grow"></span>
   <button id="undoBtn" class="btn" title="Undo (z)" disabled>↶ Undo</button>
   <button id="redoBtn" class="btn" title="Redo (Shift+Z)" disabled>↷ Redo</button>
   <button id="saveBtn" class="btn" title="Save now (s)">Save</button>
   <span id="saveStatus" class="status">—</span>
-  <button id="helpBtn" class="btn ghost" title="Keyboard & help">?</button>
+  <!-- export jobs live in the top bar (hidden until the first export is queued) -->
+  <button id="jobToggle" class="btn jobToggle" title="Export jobs — click to expand" hidden>
+    <span class="jobDot" id="jobDot"></span><span id="jobToggleLabel">Jobs</span><span id="jobCaret" aria-hidden="true">▾</span>
+  </button>
+  <button id="settingsToggle" class="btn ghost" title="Settings — storage, formats, paths & help">⚙</button>
 </header>
+
+<!-- export job panel — drops down from the Jobs button in the top bar -->
+<div id="jobPanel" class="jobPanel" hidden>
+  <div class="jobPanelHead">
+    <b>Export jobs</b>
+    <button id="jobClear" class="btn ghost sm" title="Remove finished jobs from this list">clear done</button>
+  </div>
+  <div id="jobList" class="jobList"></div>
+</div>
+
+<!-- shown while a plate loads (blurs the old plate behind it) -->
+<div id="loadOverlay" hidden>
+  <div class="loadbox"><div class="spinner"></div><div id="loadMsg" class="muted">loading…</div></div>
+</div>
 
 <main id="app">
   <!-- LEFT: overview grid -->
@@ -42,9 +65,9 @@
       <label class="mini">grid
         <select id="gridChannel"><option>BF</option><option>FL</option></select>
       </label>
-      <label class="mini" title="Move all thumbnails to a point in development">frame
-        <input id="gridFrac" type="range" min="0" max="100" value="50">
-      </label>
+      <span class="dotlegend muted" title="The dot at each thumbnail's top-right corner">
+        <i class="dot stage"></i>Iwamatsu stage&nbsp;&nbsp;<i class="dot other"></i>other image annotation
+      </span>
       <span class="grow"></span>
       <input id="blockInput" class="block" type="text" placeholder="type block e.g. A01:D12, cols 1-6"
              title="Select a block of wells by typing, then Enter">
@@ -80,6 +103,18 @@
           <div id="rhEnd" class="rhandle" hidden title="drag: range end"></div>
         </div>
       </div>
+      <!-- z-slice + rotation faders: always draggable to LOOK; the button records the
+           drag as keyframes when switched on (off = browse only). -->
+      <div id="zrow" class="zrow" hidden>
+        <button id="zrec" class="reclab" title="z-slice. Drag to look through the stack. Switch on to record the slice as a focus keyframe at each timepoint.">z</button>
+        <input id="zslider" type="range" min="1" max="1" value="1">
+        <span id="zval" class="muted mono">—</span>
+      </div>
+      <div id="rotrow" class="rotrow" hidden>
+        <button id="rotrec" class="reclab" title="rotation. Drag to preview. Switch on to record the angle as a rotation keyframe (interpolates the short way).">rot</button>
+        <input id="rotslider" type="range" min="0" max="359" value="0">
+        <span id="rotval" class="muted mono">—</span>
+      </div>
     </div>
 
     <div id="panel">
@@ -99,47 +134,176 @@
     <h3>How this works</h3>
     <p>Three annotation levels share one idea — every field is a <b>column</b> you
        define, with a type: <i>categorical</i>, <i>binary</i>, <i>range</i>, or
-       <i>free text</i>. Nothing is hard-coded; the medaka fields are just
-       suggestions you can accept, edit, or ignore.</p>
+       <i>free text</i>. Nothing is hard-coded; the suggested fields are just
+       starting points you can accept, edit, or ignore.</p>
     <ul>
       <li><b>Well</b> (main): tag wells. Rubber-band drag or click to select, then
           click a value to assign it to every selected well. <b>+ column</b> makes a
           new one; <b>binary</b> columns carry a default.</li>
       <li><b>Plate</b>: whole-folder fields — temperature, date, start time, notes.
           Click <i>Autofill</i> to pull them from the plate metadata.</li>
-      <li><b>Image / stage</b>: enable it, scrub the trajectory, and stamp a frame
-          with an Iwamatsu stage (or any image-level column). Saved per timepoint.</li>
+      <li><b>Image</b>: scrub the trajectory and stamp a frame with a stage or any
+          image-level column. The <b>z</b> / <b>rot</b> faders under the image also set
+          focus / rotation keyframes when their button is switched on. Saved per timepoint.</li>
     </ul>
     <h4>Keyboard</h4>
     <table class="keys">
       <tr><td>1–9</td><td>assign the active column's Nth value to the selection</td></tr>
       <tr><td>Tab</td><td>next active column &nbsp;·&nbsp; ←→↑↓ move well</td></tr>
       <tr><td>Space</td><td>play / pause &nbsp;·&nbsp; [ ] step one frame</td></tr>
-      <tr><td>c</td><td>toggle BF / FL &nbsp;·&nbsp; Backspace clear active column</td></tr>
+      <tr><td>c</td><td>cycle channels &nbsp;·&nbsp; , . browse z-slices &nbsp;·&nbsp; Backspace clear column</td></tr>
       <tr><td>z / Shift+Z</td><td>undo / redo &nbsp;·&nbsp; s save now</td></tr>
     </table>
-    <p class="muted">Everything autosaves to
-       <code>screening_&lt;plate&gt;.json</code> next to the crops.</p>
+    <p class="muted">Everything autosaves. Choose the formats (database / CSV / JSON) and
+       where they're stored in the <b>Settings</b> tab.</p>
   </div>
 </div>
 
 <div id="filterModal" hidden>
   <div class="card">
     <button id="filterClose" class="btn ghost close">✕</button>
-    <h3>Filter wells across all plates</h3>
-    <p class="muted">Keep only wells matching ALL of these, from every plate. The
-       matches replace the grid (labelled by plate), sorted by how many annotations
-       each already has — then annotate them further (e.g. Iwamatsu stages).</p>
+    <h3>Filter wells across plates</h3>
+    <p class="muted">Keep only wells matching ALL of these. Pick which plates to search,
+       constrain any annotation, and constrain a measurement — e.g. <i>egg_diameter above
+       1400 µm at every timepoint it was measured</i>. Matches replace the grid, labelled
+       by plate and sorted by how many annotations each already has.</p>
+
+    <div class="fsec">
+      <div class="fhead">plates
+        <span class="grow"></span>
+        <button id="fPlatesAll" class="btn ghost sm">all</button>
+        <button id="fPlatesNone" class="btn ghost sm">none</button>
+      </div>
+      <div id="filterPlates" class="chips"></div>
+    </div>
+
     <div id="filterRows"></div>
     <div class="inline" style="margin-top:8px">
-      <button id="filterAddRow" class="btn sm">+ constraint</button>
+      <button id="filterAddRow" class="btn sm">+ annotation</button>
+      <button id="filterAddMeas" class="btn sm">+ measurement</button>
       <span class="grow"></span>
       <span id="filterCount" class="muted"></span>
-      <button id="filterExport" class="btn" title="download the matching plate+well ids as JSON (for well_hyperstack.py)">⬇ Export JSON</button>
+    </div>
+
+    <div class="fsec">
+      <div class="fhead">saved filters</div>
+      <div class="inline">
+        <select id="filterSaved" title="Load a filter you saved earlier"><option value="">—</option></select>
+        <input id="filterName" type="text" placeholder="name this filter" size="16">
+        <button id="filterSave" class="btn sm">save</button>
+        <button id="filterDelete" class="btn ghost sm" title="Delete the loaded filter">delete</button>
+      </div>
+    </div>
+
+    <div class="inline" style="margin-top:10px">
+      <span class="grow"></span>
+      <span id="filterStatus" class="muted"></span>
+      <button id="filterExport" class="btn" title="download the matching plate + well ids as JSON">⬇ Export JSON</button>
       <button id="filterApply" class="btn primary">Apply</button>
     </div>
   </div>
 </div>
+<div id="exportModal" hidden>
+  <div class="card">
+    <button id="exportClose" class="btn ghost close">✕</button>
+    <h3 id="exportTitle">Export</h3>
+    <p class="muted" id="exportWho"></p>
+    <div class="inline">
+      <label><input type="radio" name="exBundle" value="single" checked> single files (one per well)</label>
+      <label><input type="radio" name="exBundle" value="bundled"> bundled (montage — placement auto by count)</label>
+    </div>
+    <div class="inline">channels &nbsp;<span id="exChannels"></span></div>
+
+    <!-- RENDER: what each frame actually shows. Which z-plane per channel, whether the
+         annotated rotation is applied, whether channels are composited, and what gets
+         burned onto each tile. -->
+    <details id="exRender" class="rblock" open>
+      <summary>Render</summary>
+
+      <div id="exPlanes" class="planes"><!-- one row per channel, built by app.js --></div>
+
+      <div class="inline" id="exTifZRow" hidden>z-planes
+        <select id="exZMode">
+          <option value="all">all slices (as acquired)</option>
+          <option value="maxproj">max projection (Z→1)</option>
+          <option value="focus">annotated focus track (Z→1)</option>
+          <option value="slice">one slice (Z→1)</option>
+        </select>
+        <input id="exZSlice" type="number" placeholder="z" style="width:4em" hidden>
+      </div>
+
+      <div class="inline">
+        <label title="Turn every frame by the rotation keyframes you set with the rot fader — the same angle the viewer previews.">
+          <input type="checkbox" id="exRotate"> apply rotation annotations</label>
+        <label id="exOverlayLab" title="Composite the selected channels into one colour movie instead of one file per channel.">
+          <input type="checkbox" id="exOverlay"> overlay channels</label>
+      </div>
+
+      <div id="exLabelBlock">
+        <div class="inline">labels
+          <label><input type="checkbox" class="exLab" value="well" checked> well</label>
+          <label><input type="checkbox" class="exLab" value="plate"> plate</label>
+          <label><input type="checkbox" class="exLab" value="stage"> stage</label>
+          <label><input type="checkbox" class="exLab" value="time"> timepoint</label>
+          <label><input type="checkbox" class="exLab" value="rotation"> angle</label>
+          <label><input type="checkbox" class="exLab" value="focus"> z</label>
+          <label><input type="checkbox" class="exLab" value="scalebar"> scale bar</label>
+        </div>
+        <div class="inline">annotations &nbsp;<span id="exLabCols" class="muted">—</span></div>
+        <div class="inline">text
+          <select id="exLabCorner">
+            <option value="tl">top-left</option><option value="tr">top-right</option>
+            <option value="bl">bottom-left</option><option value="br">bottom-right</option>
+          </select>
+          size <input id="exLabSize" type="number" placeholder="auto" style="width:4.4em">
+          <input id="exLabColour" type="color" value="#ffffff" title="label colour">
+          <label title="Repeat the timepoint on every tile instead of once per montage.">
+            <input type="checkbox" id="exLabPerTile"> per tile</label>
+        </div>
+      </div>
+      <p class="muted rnote" id="exRenderNote"></p>
+    </details>
+
+    <div class="inline">timepoints &nbsp;
+      <input id="exTpStart" type="number" placeholder="start" style="width:5em">
+      <input id="exTpEnd" type="number" placeholder="end" style="width:5em">
+      <label>&nbsp;every <input id="exTpStep" type="number" placeholder="1" style="width:4em"></label>
+      <span class="muted">&nbsp;(blank = all)</span>
+    </div>
+    <div class="inline" id="exMp4Row">fps <input id="exFps" type="number" value="20" style="width:4em"></div>
+    <div class="inline" style="margin-top:8px">
+      <span class="grow"></span>
+      <span id="exportStatus" class="muted"></span>
+      <button id="exportRun" class="btn primary">Export</button>
+    </div>
+  </div>
+</div>
+<div id="folderModal" hidden>
+  <div class="card">
+    <button id="folderClose" class="btn ghost close">✕</button>
+    <h3>Open a data folder</h3>
+    <p class="muted">Point PlateNotate at a folder that contains your plate folders — on this
+       computer or on a network share. Your annotations are saved there (or wherever you
+       choose in Settings), so you can pick up where you left off.</p>
+    <input id="folderPath" type="text" spellcheck="false"
+           placeholder="/path/to/your/plates" style="width:100%">
+    <div class="inline" style="margin-top:10px">
+      <button id="folderBrowse" class="btn" title="Pick a folder in a native dialog" hidden>Browse…</button>
+      <span class="grow"></span>
+      <span id="folderStatus" class="muted"></span>
+      <button id="folderOpen" class="btn primary">Open</button>
+    </div>
+  </div>
+</div>
+<div id="settingsModal" hidden>
+  <div class="card">
+    <button id="settingsClose" class="btn ghost close">✕</button>
+    <h3>Settings</h3>
+    <div id="settingsBody"><!-- rendered by app.js --></div>
+  </div>
+</div>
 <script src="/static/app.js"></script>
+<script src="/static/rot_tool.js"></script>
+<script src="/static/measure_tool.js"></script>
 </body>
 </html>

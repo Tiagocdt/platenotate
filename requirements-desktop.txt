@@ -1,0 +1,11 @@
+# Slim runtime for the packaged desktop annotator — freeze THIS, not the twinnet
+# ML env (which carries torch etc.). These are every dependency the annotator's
+# server + export engine actually import at runtime.
+numpy>=1.24
+tifffile>=2024.1
+imagecodecs>=2024.1        # pure-C TIF decode — the export speed-up depends on it
+pillow>=10.0               # /api/frame PNG resize
+pywebview>=5.0             # native window
+imageio-ffmpeg>=0.5        # bundled ffmpeg binary → MP4 export with no system ffmpeg
+# macOS: pip pulls pyobjc-framework-WebKit automatically.
+# Windows: uses the Edge WebView2 runtime (present on Win10/11); pip pulls pythonnet.

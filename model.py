@@ -41,11 +41,23 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-COLUMN_TYPES = ("categorical", "binary", "range", "free")
+
+def _map_wells(items, fn, workers=16):
+    """Run fn over well dirs in PARALLEL and return the results (order preserved). The
+    per-well globbing is I/O-bound, so a thread pool hides share latency — a plate over
+    a slow SMB mount lists far faster. Sequential for a tiny plate (thread overhead)."""
+    items = list(items)
+    if len(items) <= 2:
+        return [fn(i) for i in items]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(fn, items))
+
+COLUMN_TYPES = ("categorical", "binary", "range", "free", "angle", "measurement")
 SCOPES = ("plate", "well", "image")
 
 # The cross-plate recommendation registry (UNION of every column/value ever
@@ -195,9 +207,17 @@ def _coerce_range(val):
 
 def _coerce_value(ctype, val):
     """Canonical form for a value given its column type: range -> [start,end];
-    everything else -> a non-empty stripped string, or None to drop it."""
+    angle -> float degrees; measurement -> the {line,length_px,length_um} object
+    passed through; everything else -> a non-empty stripped string, or None to drop."""
     if val is None:
         return None
+    if ctype == "measurement":                       # object value: {line, length_px, ...}
+        return val if isinstance(val, dict) and val else None
+    if ctype == "angle":
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
     if ctype == "range" or isinstance(val, (list, tuple)):
         return _coerce_range(val)
     s = val.strip() if isinstance(val, str) else str(val).strip()
@@ -234,14 +254,52 @@ def _well_meta_position(well_dir: Path) -> Optional[str]:
     return _norm_pos(pos) or pos
 
 
-def detect_layout(plate_dir: Path) -> str:
-    """'v2' (bf/<pos>/SL0N/ + fl/<pos>/), 'v1_screening', 'v1_crops', or 'flat'.
+_CHAN_SKIP = {"bf", "fl", "processed", "metadata", "detailed", "screening", "crops"}
 
-    'flat' = the degenerate general case: a folder of images with no bf/fl split
+
+def _plate_meta(plate_dir: Path) -> dict:
+    """plate_metadata.json (root or metadata/) as a dict, or {}."""
+    for p in (plate_dir / "plate_metadata.json", plate_dir / "metadata" / "plate_metadata.json"):
+        if p.exists():
+            try:
+                return json.load(open(p))
+            except (OSError, json.JSONDecodeError):
+                return {}
+    return {}
+
+
+def _channel_dirs(plate_dir: Path):
+    """[(channel_label, dir)] for a PER-CHANNEL plate — every top-level folder (minus
+    role/aux dirs) that holds <well>/SL0N/ crops. Label = the folder name (the raw
+    acquisition token, e.g. 'CO6'). Cheap: probes only the first well subdir per dir."""
+    out = []
+    try:
+        entries = sorted(plate_dir.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        if not d.is_dir() or d.name.lower() in _CHAN_SKIP:
+            continue
+        try:
+            wsub = next((w for w in d.iterdir() if w.is_dir()), None)
+        except OSError:
+            wsub = None
+        if wsub is not None and next(wsub.glob("SL*"), None) is not None:
+            out.append((d.name, d))
+    return out
+
+
+def detect_layout(plate_dir: Path) -> str:
+    """'v2' (bf/+fl/ role folders), 'v3' (one folder per acquisition channel, each
+    with per-z-slice crops), 'v1_screening', 'v1_crops', or 'flat'.
+
+    'flat' = the degenerate general case: a folder of images with no channel split
     (each image treated as one 'well' with a single frame). Keeps the tool usable
     outside the medaka pipeline."""
     if (plate_dir / "bf").is_dir():
         return "v2"
+    if _channel_dirs(plate_dir):
+        return "v3"
     if (plate_dir / "screening").is_dir() and any((plate_dir / "screening").iterdir()):
         return "v1_screening"
     if (plate_dir / "crops").is_dir():
@@ -296,13 +354,22 @@ def discover_plate(plate_dir: Path) -> dict:
     layout = detect_layout(plate_dir)
     wells: dict = {}          # pos -> {"BF": {tp:fname}, "FL": {tp:fname}, "bf_dir","fl_dir"}
     channels = ["BF", "FL"]
+    detect_channel = "BF"     # the channel whose z drives the `slice` readout / default view
 
     if layout == "v2":
         bf_root, fl_root = plate_dir / "bf", plate_dir / "fl"
-        for d in sorted(p for p in bf_root.iterdir() if p.is_dir()):
+        # EXTRA fluorescent channels (multi-channel runs): any top-level folder besides
+        # bf/fl/processed/... that holds per-well crops — indexed as flat max-projections
+        # (like fl/), so a 3rd/4th channel is NOT dropped. Label = the folder name upper-cased.
+        _skip = {"bf", "fl", "processed", "metadata", "detailed", "screening", "crops"}
+        extra = [(cd.name.upper(), cd) for cd in sorted(plate_dir.iterdir())
+                 if cd.is_dir() and cd.name.lower() not in _skip
+                 and next(cd.glob("*/*.tif"), None) is not None]
+        channels = ["BF", "FL"] + [lab for lab, _ in extra]
+        def _one_v2(d):
             pos = _well_meta_position(d) or _norm_pos(d.name)
             if pos is None:
-                continue
+                return None
             mid = _middle_slice_dir(d)
             bf_frames = _sorted_frames(mid.glob("*.tif")) if mid else []
             # index EVERY z-slice dir (SL01..SL05) so the viewer can show a chosen
@@ -316,12 +383,67 @@ def discover_plate(plate_dir: Path) -> dict:
                 bf_z_dir[int(m.group(1))] = str(sl)
             fl_d = fl_root / d.name
             fl_frames = _sorted_frames(fl_d.glob("*.tif")) if fl_d.is_dir() else []
-            wells[pos] = {
+            entry = {
                 "BF": dict(bf_frames), "FL": dict(fl_frames),
                 "bf_dir": str(mid) if mid else None,
                 "fl_dir": str(fl_d) if fl_d.is_dir() else None,
                 "bf_z": bf_z, "bf_z_dir": bf_z_dir,
             }
+            for lab, croot in extra:                       # extra fluorescent channels (flat)
+                cwd = croot / d.name
+                if cwd.is_dir():
+                    entry[lab] = dict(_sorted_frames(cwd.glob("*.tif")))
+                    entry[lab + "_dir"] = str(cwd)
+            return pos, entry
+        for res in _map_wells(sorted(p for p in bf_root.iterdir() if p.is_dir()), _one_v2):
+            if res:
+                wells[res[0]] = res[1]
+    elif layout == "v3":
+        # NEW per-channel layout: one folder per acquisition channel (CO2/CO4/CO6…),
+        # each per z-slice. plate_metadata.json `bf_channel` is the detection channel
+        # (else the first). EVERY channel now carries real z-slices, so the z-slider
+        # applies within the SELECTED channel (not just brightfield).
+        meta = _plate_meta(plate_dir)
+        cdirs = _channel_dirs(plate_dir)                   # [(label, dir)]
+        labels = [lab for lab, _ in cdirs]
+        bf_ch = meta.get("bf_channel")
+        detect_channel = bf_ch if bf_ch in labels else (labels[0] if labels else None)
+        channels = ([detect_channel] if detect_channel else []) + \
+                   [l for l in labels if l != detect_channel]
+        cdir_of = {lab: d for lab, d in cdirs}
+        det_dir = cdir_of.get(detect_channel)
+        well_dirs = sorted(p for p in det_dir.iterdir() if p.is_dir()) if det_dir else []
+        def _one_v3(wd):
+            pos = _well_meta_position(wd) or _norm_pos(wd.name)
+            if pos is None:
+                return None
+            entry = {}
+            for lab in channels:
+                cwd = cdir_of[lab] / wd.name
+                if not cwd.is_dir():
+                    continue
+                zmap, zdir = {}, {}                          # per z-slice: {z: {tp: fname}}
+                for sl in sorted(cwd.glob("SL*")):
+                    m = re.match(r"SL0*(\d+)", sl.name)
+                    if not m or not sl.is_dir():
+                        continue
+                    zmap[int(m.group(1))] = dict(_sorted_frames(sl.glob("*.tif")))
+                    zdir[int(m.group(1))] = str(sl)
+                mx = dict(_sorted_frames(cwd.glob("*_SLMX.tif")))   # optional loose max-proj
+                mid = _middle_slice_dir(cwd)                        # flat default = middle z
+                flat = dict(_sorted_frames(mid.glob("*.tif"))) if mid else {}
+                entry[lab] = flat or mx
+                entry[lab + "_dir"] = str(mid) if mid else (str(cwd) if mx else None)
+                if zmap:
+                    entry[lab + "_z"] = zmap
+                    entry[lab + "_z_dir"] = zdir
+                if mx:
+                    entry[lab + "_mx"] = mx
+                    entry[lab + "_mx_dir"] = str(cwd)
+            return pos, entry
+        for res in _map_wells(well_dirs, _one_v3):
+            if res:
+                wells[res[0]] = res[1]
     elif layout in ("v1_screening", "v1_crops"):
         root = plate_dir / ("screening" if layout == "v1_screening" else "crops")
         for d in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -339,8 +461,12 @@ def discover_plate(plate_dir: Path) -> dict:
             }
     else:  # flat: a bare folder of images, one 'well' per image, single frame
         channels = ["IMG"]
-        imgs = sorted(p for p in plate_dir.iterdir()
-                      if p.suffix.lower() in _IMG_EXTS)
+        detect_channel = "IMG"
+        try:                                           # tolerate an unmounted / vanished share
+            imgs = sorted(p for p in plate_dir.iterdir()
+                          if p.suffix.lower() in _IMG_EXTS)
+        except OSError:
+            imgs = []
         for i, fp in enumerate(imgs):
             pos = fp.stem
             wells[pos] = {"IMG": {1: fp.name}, "img_dir": str(plate_dir)}
@@ -351,16 +477,23 @@ def discover_plate(plate_dir: Path) -> dict:
               for w in ordered}
     n_frames = {w: max((len(wells[w].get(ch, {})) for ch in channels), default=0)
                 for w in ordered}
-    z_slices = sorted({z for w in ordered for z in wells[w].get("bf_z", {})})
+    # z-slices available PER channel ([] = a flat channel with no z, e.g. old FL). Old
+    # BF is keyed 'bf_z'; new per-channel is '<ch>_z'.
+    channel_z = {ch: sorted({z for w in ordered
+                             for z in wells[w].get("bf_z" if ch == "BF" else ch + "_z", {})})
+                 for ch in channels}
+    z_slices = channel_z.get(detect_channel, [])
     return {
         "plate": plate_dir.name,
         "plate_dir": str(plate_dir),
         "layout": layout,
         "channels": channels,
+        "detect_channel": detect_channel,   # default view + the channel `slice` refers to
+        "channel_z": channel_z,             # {channel: [z-slices]}; [] = flat (no z-slider)
         "wells": ordered,
         "frames": frames,
         "n_frames": n_frames,
-        "z_slices": z_slices,   # available BF z-slices, e.g. [1,2,3,4,5]
+        "z_slices": z_slices,   # the detection channel's z-slices, e.g. [1..7]
         "autofill": autofill,
         "_well_index": wells,   # server-side use (path lookup); not sent to client
     }
@@ -497,10 +630,11 @@ def _clean_columns(cols) -> dict:
             entry["values"] = seen
         if "default" in spec and spec["default"] not in (None, ""):
             entry["default"] = _coerce_value(typ, spec["default"])
-        # 'fill: forward' marks a keyframe column (image staging / slice): stored
-        # values are boundaries and the effective value forward-fills between them.
-        if spec.get("fill") == "forward":
-            entry["fill"] = "forward"
+        # 'fill' marks a keyframe column: 'forward' = stored values are boundaries and
+        # the effective value holds between them (slice / iwamatsu_stage); 'interpolate'
+        # = the numeric value eases (smoothstep) between keyframes (rotation).
+        if spec.get("fill") in ("forward", "interpolate"):
+            entry["fill"] = spec["fill"]
         out[name.strip()] = entry
     return out
 
@@ -508,7 +642,12 @@ def _clean_columns(cols) -> dict:
 def _ensure_col(cols: dict, name: str, sample_val=None):
     """Fold in a column referenced by an annotation but not declared."""
     if name not in cols:
-        typ = "range" if isinstance(sample_val, (list, tuple)) else "categorical"
+        if isinstance(sample_val, dict):
+            typ = "measurement"
+        elif isinstance(sample_val, (list, tuple)):
+            typ = "range"
+        else:
+            typ = "categorical"
         cols[name] = {"type": typ, "values": []}
     return cols[name]
 
