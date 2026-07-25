@@ -114,5 +114,19 @@ check(compose.time_label(5, [1], None) == "t5", "time: no cadence → just the t
 u16 = np.full((4, 4), 4096, np.uint16)
 check(compose._u8(u16).dtype == np.uint8, "dtype: 16-bit sources are reduced to 8-bit")
 
+# ------------------------------------------------- plate id canonicalisation
+# The renderers are handed the FOLDER name; the DB keys rows by the date-stripped id.
+# Without both keys a dated plate finds no annotations at all in the DB and silently
+# falls back to JSON (or, for cadence and pixel size, to nothing).
+import annotations as anno                                            # noqa: E402
+
+check(anno.plate_keys("20260627_AQV07_x") == ["20260627_AQV07_x", "AQV07_x"],
+      "plate id: a dated folder also tries its date-stripped id")
+check(anno.plate_keys("AQV05_y") == ["AQV05_y"],
+      "plate id: an undated folder is tried once")
+check(anno.plate_keys("") == [""], "plate id: empty input doesn't explode")
+check(anno.plate_keys("2026_AQV01") == ["2026_AQV01"],
+      "plate id: only a full YYYYMMDD_ prefix is stripped, not any digits")
+
 print(f"\ncompose_test: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

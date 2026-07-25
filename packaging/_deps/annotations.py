@@ -9,8 +9,27 @@ imaging/data/medaka.db.
 from __future__ import annotations
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
+
+_DATE_PREFIX = re.compile(r"^\d{8}_")
+
+
+def plate_keys(plate_id):
+    """The ids to try for a plate, most specific first.
+
+    The annotator stores rows under the CANONICAL plate id — the folder name with any
+    leading YYYYMMDD_ stripped (db_store.canon_plate) — so one plate opened as
+    `20260627_AQV07_…` (dated share folder) and as `AQV07_…` (local folder) is one
+    plate. Renderers are handed the FOLDER name, so every lookup here has to try both;
+    without this a dated plate silently finds no annotations in the DB."""
+    p = str(plate_id or "")
+    keys = [p]
+    canon = _DATE_PREFIX.sub("", p)
+    if canon and canon != p:
+        keys.append(canon)
+    return keys
 
 
 def db_path():
@@ -36,11 +55,15 @@ def image_keyframes(plate_id, well, column, db=None, screening_dir=None):
     interpolate). Latest-updated annotator wins per timepoint if several exist."""
     conn = _ro_conn(db)
     if conn is not None:
+        rows = []
         try:
-            rows = conn.execute(
-                'SELECT timepoint, value, updated FROM image_annotation '
-                'WHERE plate_id=? AND well=? AND "column"=? ORDER BY timepoint, updated',
-                (plate_id, well, column)).fetchall()
+            for key in plate_keys(plate_id):
+                rows = conn.execute(
+                    'SELECT timepoint, value, updated FROM image_annotation '
+                    'WHERE plate_id=? AND well=? AND "column"=? ORDER BY timepoint, updated',
+                    (key, well, column)).fetchall()
+                if rows:
+                    break
         except sqlite3.Error:
             rows = []
         finally:
@@ -72,13 +95,19 @@ def measurements(plate_id, well=None, name=None, db=None):
         return []
     q = ('SELECT well, timepoint, name, x0,y0,x1,y1, length_px, length_um '
          'FROM measurement WHERE plate_id=?')
-    args = [plate_id]
+    tail = ''
+    extra = []
     if well:
-        q += ' AND well=?'; args.append(well)
+        tail += ' AND well=?'; extra.append(well)
     if name:
-        q += ' AND name=?'; args.append(name)
+        tail += ' AND name=?'; extra.append(name)
     try:
-        return conn.execute(q + ' ORDER BY well, timepoint', args).fetchall()
+        for key in plate_keys(plate_id):
+            rows = conn.execute(q + tail + ' ORDER BY well, timepoint',
+                                [key, *extra]).fetchall()
+            if rows:
+                return rows
+        return []
     except sqlite3.Error:
         return []
     finally:
@@ -90,10 +119,14 @@ def well_annotations(plate_id, db=None, screening_dir=None):
     fallback. Used to burn condition labels (mixture, line, …) onto montage tiles."""
     conn = _ro_conn(db)
     if conn is not None:
+        rows = []
         try:
-            rows = conn.execute(
-                'SELECT well, "column", value FROM well_annotation WHERE plate_id=?',
-                (plate_id,)).fetchall()
+            for key in plate_keys(plate_id):
+                rows = conn.execute(
+                    'SELECT well, "column", value FROM well_annotation WHERE plate_id=?',
+                    (key,)).fetchall()
+                if rows:
+                    break
         except sqlite3.Error:
             rows = []
         finally:
@@ -121,8 +154,12 @@ def plate_meta(plate_id, db=None):
     if conn is None:
         return {}
     try:
-        r = conn.execute('SELECT date, line, cre_state, cadence_min, notes FROM plate '
-                         'WHERE plate_id=?', (plate_id,)).fetchone()
+        r = None
+        for key in plate_keys(plate_id):
+            r = conn.execute('SELECT date, line, cre_state, cadence_min, notes FROM plate '
+                             'WHERE plate_id=?', (key,)).fetchone()
+            if r:
+                break
     except sqlite3.Error:
         return {}
     finally:
@@ -147,15 +184,19 @@ def pixel_size_um(plate_id, db=None):
         n = len(vals)
         return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
     try:
-        rows = conn.execute('SELECT length_um, length_px FROM measurement WHERE plate_id=? '
-                            'AND length_px > 0', (plate_id,)).fetchall()
-        v = _median([u / p for u, p in rows if u and p])
-        if v:
-            return v
-        rows = conn.execute('SELECT px_nm FROM image WHERE plate_id=? AND px_nm IS NOT NULL '
-                            'LIMIT 5000', (plate_id,)).fetchall()
-        v = _median([r[0] / 1000.0 for r in rows if r[0]])
-        return v
+        for key in plate_keys(plate_id):
+            rows = conn.execute('SELECT length_um, length_px FROM measurement '
+                                'WHERE plate_id=? AND length_px > 0', (key,)).fetchall()
+            v = _median([u / p for u, p in rows if u and p])
+            if v:
+                return v
+        for key in plate_keys(plate_id):
+            rows = conn.execute('SELECT px_nm FROM image WHERE plate_id=? AND px_nm IS NOT NULL '
+                                'LIMIT 5000', (key,)).fetchall()
+            v = _median([r[0] / 1000.0 for r in rows if r[0]])
+            if v:
+                return v
+        return None
     except sqlite3.Error:
         return None
     finally:

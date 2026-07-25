@@ -127,7 +127,7 @@ full imaging tree, so this repo runs standalone).
 
 ```bash
 node tests/js_harness.mjs        # 102 headless GUI assertions, no browser
-python tests/compose_test.py     # 29 render-engine assertions, no image data
+python tests/compose_test.py     # 33 render-engine assertions, no image data
 python tests/db_roundtrip_test.py
 ```
 

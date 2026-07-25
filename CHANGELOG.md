@@ -4,6 +4,24 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.1.1] — 2026-07-25
+
+### Fixed — dated plate folders found no annotations in the database
+
+Rows are keyed by the **canonical** plate id (the folder name with any leading
+`YYYYMMDD_` stripped), but the renderers are handed the folder name. For a dated
+folder such as `20260627_AQV07_…` every database lookup therefore missed:
+
+- keyframes and well annotations quietly came from the screening JSON instead of the
+  database — the same values today, but not the source of truth, and stale the moment
+  the two diverge;
+- `plate_meta` and `pixel_size_um` have no JSON fallback, so montages of a dated plate
+  had **no elapsed-time label and no scale bar at all**, with nothing to say why.
+
+`annotations.plate_keys()` now tries both ids in every accessor (`image_keyframes`,
+`measurements`, `well_annotations`, `plate_meta`, `pixel_size_um`). AQV07 montages now
+carry `t5 · 0h40` and a 1 mm bar. Undated folders are unaffected — one lookup, as before.
+
 ## [1.1.0] — 2026-07-25
 
 The first released version. Everything below was built in one session on top of the
@@ -79,7 +97,7 @@ Every option maps to something already saved in the app.
   the author's full imaging tree.
 - Public README, MIT `LICENSE`, `docs/` (desktop packaging, image-tool plugin API,
   design history), tightened `.gitignore` (no databases or annotations).
-- `tests/compose_test.py` (29 assertions); the JS harness grew from 76 to 102.
+- `tests/compose_test.py` (33 assertions); the JS harness grew from 76 to 102.
 
 ## [1.0.0] — 2026-07-23
 
