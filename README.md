@@ -1,34 +1,76 @@
-# PlateNotate
+<p align="center">
+  <img src="assets/logo-320.png" alt="PlateNotate" width="150">
+</p>
 
-**Annotate plate-based microscopy time-lapses — plate, well and frame — then export
-exactly what you annotated as a movie, montage or TIF hyperstack.**
+<h1 align="center">PlateNotate</h1>
 
-PlateNotate is a small local web app (Python standard library + Pillow, no framework,
-no build step) for screening plates of embryos, organoids, colonies — anything imaged
-well-by-well over time. Every field is a **column you define**, so nothing about any
-one organism is hard-wired; the medaka fields it ships with are just editable
-suggestions.
+<p align="center">
+  <b>Annotate plate-based microscopy time-lapses — plate, well and frame —<br>
+  then export exactly what you annotated as a movie, montage or TIF hyperstack.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Tiagocdt/platenotate/releases/latest"><b>⤓ Download the app</b></a>
+  &nbsp;·&nbsp; macOS · Windows · Linux &nbsp;·&nbsp; no Python, no terminal
+</p>
+
+PlateNotate is a desktop app for screening plates of embryos, organoids, colonies —
+anything imaged well-by-well over time. Every field is a **column you define**, so
+nothing about any one organism is hard-wired; the medaka fields it ships with are just
+editable suggestions.
 
 ```
 segment  →  ANNOTATE (this tool)  →  export / analyse
 ```
 
-## Install & run
+## Install
+
+**[Download the latest release](https://github.com/Tiagocdt/platenotate/releases/latest)**,
+unzip, and double-click. Nothing else to install — Python, the image libraries and
+ffmpeg are all inside the app.
+
+| Your computer | Download | First launch |
+|---|---|---|
+| **macOS** | `PlateNotate-macOS.zip` | **Right-click the app → Open**, then confirm |
+| **Windows** | `PlateNotate-Windows.zip` | Unzip, run `PlateNotate.exe` → "More info" → "Run anyway" |
+| **Linux** | `PlateNotate-Linux.tar.gz` | Extract, run `./PlateNotate` |
+
+The app is **not code-signed** — that needs a paid Apple/Microsoft developer
+certificate — so your computer warns you the first time. On macOS you must
+**right-click → Open** on that first launch; plain double-clicking a downloaded
+unsigned app is refused outright, with no way through from the dialog. If macOS still
+blocks it, run once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/PlateNotate.app
+```
+
+On first run, click **📂 Open** and point it at the folder holding your plate folders.
+It reopens there next time.
+
+Nothing leaves your machine: PlateNotate is a local app over your own files — no
+account, no upload, no network access.
+
+<details>
+<summary><b>Run from source instead</b> (for developing, or on a machine you can't install to)</summary>
 
 ```bash
 git clone https://github.com/Tiagocdt/platenotate.git
 cd platenotate
-pip install -r requirements-desktop.txt      # Pillow, numpy, tifffile + optional extras
-python server.py --data-root /path/to/your/plates
+pip install -r requirements-desktop.txt
+python server.py --data-root /path/to/your/plates   # browser, http://127.0.0.1:8765/
+python desktop.py                                    # or a native window
 ```
 
-Then open <http://127.0.0.1:8765/>. Or run it as a **native desktop window** with
-`python desktop.py` (needs `pywebview`), or on macOS double-click `run_app.command`.
-`./run.sh` is the everyday launcher: it self-updates (fast-forward only), stops any
-previous instance, and opens the browser. Building a transferable `.app` / `.exe` for
-collaborators is documented in [`docs/DESKTOP.md`](docs/DESKTOP.md).
+`./run.sh` is the everyday launcher: it fast-forwards the checkout, stops any previous
+instance, and opens the browser. `python server.py --selftest` boots the app headless
+and checks it serves — the same check CI runs against every packaged build.
 
-Nothing leaves your machine — it's a loopback server over your own files.
+To build the app yourself: `bash packaging/build.sh` inside a venv made from
+`requirements-desktop.txt` (see [`docs/DESKTOP.md`](docs/DESKTOP.md)). PyInstaller
+cannot cross-compile, so each platform's build must run on that platform — which is
+what the GitHub Actions workflow does on every version tag.
+</details>
 
 ## What your data should look like
 
@@ -116,6 +158,8 @@ and a `screening_<plate>.json` (schema v3) — pick the formats in Settings.
 | `version.py`, `VERSION` | version + the fast-forward self-update |
 | `index.html`, `static/` | the GUI (vanilla JS, no build) — `rot_tool.js` / `measure_tool.js` are plugins |
 | `packaging/` | PyInstaller recipe + the vendored engine modules a standalone clone needs |
+| `assets/` | the logo, and the `.icns` / `.ico` app icons built from it |
+| `.github/workflows/` | builds + smoke-tests the app on all three platforms, and publishes the release |
 | `tests/` | `js_harness.mjs` (headless GUI), `compose_test.py` (render engine), `db_roundtrip_test.py` |
 | `docs/` | desktop packaging, the image-tool plugin API, and design history |
 

@@ -4,6 +4,46 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.2.0] — 2026-07-27
+
+### A real app you download and double-click
+
+Until now the repo only contained *instructions* for building a desktop app, and CI only
+uploaded Actions artifacts — which expire after 90 days and need a GitHub login, so they
+were useless as a download link. Anyone wanting to use PlateNotate still had to install
+Python, `pip install pywebview`, and run a command. That is fixed:
+
+- **Every version tag now publishes a GitHub Release** with `PlateNotate-macOS.zip`,
+  `PlateNotate-Windows.zip` and `PlateNotate-Linux.tar.gz` attached. Download, unzip,
+  double-click. Python, Pillow/numpy/tifffile/imagecodecs and ffmpeg are all inside.
+- **`--selftest`** boots the app headless, fetches the pages a browser needs and imports
+  the export engine. CI runs it against the **frozen** bundle on all three platforms, so
+  a build that compiles but dies on launch can never be released. It is also the fastest
+  way to check a local build: `python server.py --selftest`.
+- **The packaged app no longer guesses a data root inside its own bundle.** It opens the
+  folder you last used (`last_data_root`), else your home folder, and "📂 Open" takes it
+  from there.
+- **Check for updates works without git.** A packaged app has no checkout to compare
+  against, so the check asks the GitHub Releases API and offers a download link;
+  a source checkout still fast-forwards itself as before. Only on an explicit click —
+  no background polling.
+- Linux builds now install the GTK/WebKit packages pywebview needs.
+
+### Logo
+
+The PlateNotate mark is now the browser-tab favicon, the mark in the app's top bar, the
+macOS/Windows app icon (`assets/icon.icns` / `icon.ico`, generated from `assets/logo.png`)
+and the README header.
+
+### Fixed
+
+- `_serve(host, 0)` reported port `0` instead of the port the socket actually got, so
+  anything asking it for a URL — including the new selftest — built an unreachable
+  address. It now reads the bound port from the socket.
+- Static handler serves `.png` / `.svg` / `.ico` with the right content type (the
+  favicon was being sent as `application/octet-stream`), and caches images for a day
+  while keeping the code uncached.
+
 ## [1.1.2] — 2026-07-25
 
 ### Fixed — `well_hyperstack.py`'s command line was broken

@@ -21,7 +21,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import server  # noqa: E402  (the existing annotator server, imported not spawned)
+import server   # noqa: E402  (the existing annotator server, imported not spawned)
+import version  # noqa: E402
 
 try:
     import webview  # pywebview
@@ -46,7 +47,14 @@ class Bridge:
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    data_root = Path(argv[0]).expanduser().resolve() if argv else Path(server.DEFAULT_DATA_ROOT)
+    # --selftest must be handled HERE, before any window exists: this file is the frozen
+    # app's entry point, so it is what CI can actually run, and webview.start() would
+    # block forever on a machine with no display.
+    if "--selftest" in argv:
+        return 0 if server.selftest() else 1
+    positional = [a for a in argv if not a.startswith("-")]
+    data_root = (Path(positional[0]).expanduser().resolve() if positional
+                 else server.default_data_root())
 
     # boot the server exactly like server.main(), but keep it in-process
     server.Handler.data_root = data_root
@@ -55,7 +63,7 @@ def main(argv=None):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
     url = f"http://127.0.0.1:{port}/"
-    print(f"PlateNotate (desktop)  →  {url}\n  data root: {data_root}", flush=True)
+    print(f"PlateNotate v{version.version()} (desktop)  →  {url}\n  data root: {data_root}", flush=True)
 
     bridge = Bridge()
     win = webview.create_window("PlateNotate", url,
@@ -70,4 +78,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

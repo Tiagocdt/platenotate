@@ -1235,15 +1235,23 @@ function renderSettings(body){
   const row = elt('div', 'inline'); row.style.marginTop = '6px';
   const chk = elt('button', 'btn sm', 'Check for updates');
   const upd = elt('button', 'btn sm primary', 'Update now'); upd.hidden = true;
+  const dl = elt('a', 'btn sm primary', '⤓ Download the new version'); dl.hidden = true;
+  dl.target = '_blank'; dl.rel = 'noopener';
   const msg = elt('span', 'muted');
   const show = v => {
     const g = v.git || {};
     vline.textContent = 'v' + v.version + (g.sha ? '  ·  ' + g.sha + (g.branch ? ' (' + g.branch + ')' : '') : '')
       + (g.dirty ? '  ·  local edits' : '');
-    upd.hidden = !v.update_available;
-    msg.textContent = !g.sha ? 'not a git checkout — update by downloading a new build'
-      : v.update_available ? v.behind + ' new commit' + (v.behind === 1 ? '' : 's') + ' waiting'
-      : 'up to date';
+    const rel = v.release;
+    upd.hidden = !(v.update_available && g.sha);          // only a checkout can self-update
+    dl.hidden = !(rel && rel.newer);                      // a packaged app downloads instead
+    if (rel && rel.url) dl.href = rel.url;
+    msg.textContent = g.sha
+      ? (v.update_available ? v.behind + ' new commit' + (v.behind === 1 ? '' : 's') + ' waiting'
+                            : 'up to date')
+      : rel ? (rel.newer ? 'version ' + rel.version + ' is available'
+                         : 'up to date (newest release is ' + rel.version + ')')
+            : 'click "Check for updates" to ask GitHub for the newest version';
   };
   chk.onclick = async () => {
     msg.textContent = 'checking…';
@@ -1259,7 +1267,7 @@ function renderSettings(body){
       if (r.restart) setStatus('updated — restart PlateNotate to load the new version', 'saved');
     } catch (e){ msg.textContent = 'update failed: ' + e; }
   };
-  row.append(chk, upd, msg);
+  row.append(chk, upd, dl, msg);
   s5.appendChild(row);
   jget('/api/version').then(show).catch(() => {});      // free: uses the last fetch
 }

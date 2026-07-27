@@ -1,12 +1,19 @@
 name: Build PlateNotate
+
+# Builds a double-clickable app for macOS, Windows and Linux and — on a version tag —
+# publishes them as a GitHub RELEASE. The release is the point: Actions artifacts expire
+# after 90 days and need a GitHub login, so they are useless as a download link for a
+# colleague. Release assets are permanent and public.
 on:
   workflow_dispatch:          # run manually from the Actions tab
   push:
-    tags: ["v*"]              # …or on a version tag (v1.0.0)
+    tags: ["v*"]              # …or on a version tag (v1.2.0)
+
+permissions:
+  contents: write             # needed to create the release
 
 # NOTE: this workflow expects the repo to contain packaging/_deps/ (the vendored sibling
-# modules — commit them via `python packaging/gather_deps.py`). Set `working-directory`
-# below if the annotator isn't at the repo root.
+# modules — commit them via `python packaging/gather_deps.py`).
 jobs:
   build:
     strategy:
@@ -19,10 +26,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libgirepository1.0-dev gir1.2-webkit2-4.1 \
+                                  python3-gi python3-gi-cairo gir1.2-gtk-3.0
       - name: Install deps
         run: python -m pip install -r requirements-desktop.txt pyinstaller
       - name: Build
         run: python -m PyInstaller --noconfirm --clean packaging/notate.spec
+
+      # ---- smoke test: the frozen app must actually boot and serve the UI ----
+      # A bundle that builds but dies on launch is worse than no bundle at all, so the
+      # server is started headless out of the SAME frozen tree that ships.
+      - name: Smoke test (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          exe=$(ls dist/PlateNotate.app/Contents/MacOS/PlateNotate 2>/dev/null || ls dist/PlateNotate/PlateNotate)
+          "$exe" --selftest
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dist\PlateNotate\PlateNotate.exe --selftest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: cd dist && zip -qry PlateNotate-macOS.zip PlateNotate.app
@@ -32,7 +61,50 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: cd dist && tar czf PlateNotate-Linux.tar.gz PlateNotate
+
       - uses: actions/upload-artifact@v4
         with:
           name: PlateNotate-${{ runner.os }}
-          path: dist/PlateNotate-*
+          path: |
+            dist/PlateNotate-*.zip
+            dist/PlateNotate-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+      - name: List what will be published
+        run: ls -la downloads/
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: downloads/*
+          name: PlateNotate ${{ github.ref_name }}
+          body: |
+            **Download the app for your computer, unzip it, and double-click it.**
+            No Python, no terminal, nothing to install.
+
+            | Your computer | Download | First launch |
+            |---|---|---|
+            | macOS | `PlateNotate-macOS.zip` | **Right-click the app → Open**, then confirm |
+            | Windows | `PlateNotate-Windows.zip` | Unzip, run `PlateNotate.exe` → "More info" → "Run anyway" |
+            | Linux | `PlateNotate-Linux.tar.gz` | Extract, run `./PlateNotate` |
+
+            The app is **not code-signed** (that needs a paid Apple/Microsoft developer
+            certificate), so the first launch shows a warning. On macOS you must
+            right-click → Open the *first* time — double-clicking a downloaded unsigned
+            app just refuses, with no way through from that dialog. If it is still
+            blocked, run once:
+            `xattr -dr com.apple.quarantine /Applications/PlateNotate.app`
+
+            Everything stays on your machine: PlateNotate is a local app over your own
+            image folders — no account, no upload, no network access.
+
+            See [CHANGELOG.md](https://github.com/Tiagocdt/platenotate/blob/main/CHANGELOG.md)
+            for what changed in this version.

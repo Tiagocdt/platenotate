@@ -45,8 +45,23 @@ import db_store
 import version
 
 APP_DIR = Path(__file__).resolve().parent
-# plates live under imaging/data/AQ-EMBL/ (server.py is at imaging/tools/label_annotator/)
+FROZEN = getattr(sys, "frozen", False)          # running from a packaged .app / .exe
+# In the source tree, plates live under imaging/data/AQ-EMBL/ (server.py is at
+# imaging/tools/label_annotator/). A packaged app is somewhere else entirely — it has no
+# business guessing a path inside its own bundle — so it starts at the folder you last
+# opened, and otherwise at your home folder, where "📂 Open" takes over.
 DEFAULT_DATA_ROOT = APP_DIR.parents[1] / "data" / "AQ-EMBL"
+
+
+def default_data_root() -> Path:
+    """The folder to open on launch: the one last opened, else the dev-tree default,
+    else home. Never a path inside the bundle."""
+    last = (_load_settings().get("last_data_root") or "").strip()
+    if last and Path(last).is_dir():
+        return Path(last)
+    if not FROZEN and DEFAULT_DATA_ROOT.is_dir():
+        return DEFAULT_DATA_ROOT
+    return Path.home()
 
 # ------------------------------------------------------------------ DB-first store
 # medaka.db is the single source of truth for annotations (not per-plate JSON).
@@ -120,6 +135,7 @@ _SETTINGS_DEFAULTS = {
     "formats": {"db": True, "csv": True, "json": True},
     "export_dir": "",        # folder for TIF/MP4 exports; "" = next to the plate (legacy)
     "filters": {},           # saved cross-plate filters: {name: {plates, constraints, …}}
+    "last_data_root": "",    # the folder last opened — a packaged app reopens it
 }
 
 
@@ -653,8 +669,16 @@ def _version_info(fetch: bool = False) -> dict:
     `fetch=1` contacts the remote (a couple of seconds); the default is free and answers
     from the last fetch, which run.sh refreshes on every launch."""
     st = version.git_state(fetch=fetch)
-    return {"version": version.version(), "git": st,
+    info = {"version": version.version(), "git": st,
             "behind": st.get("behind", 0), "update_available": bool(st.get("behind", 0))}
+    # No checkout (a packaged app) → ask GitHub for the newest release instead, but only
+    # on an explicit check. `git` stays empty so the client knows it can't self-update.
+    if fetch and not st:
+        rel = version.latest_release()
+        if rel:
+            info["release"] = rel
+            info["update_available"] = bool(rel.get("newer"))
+    return info
 
 
 def _load_config(data_root: Path) -> dict:
@@ -787,10 +811,15 @@ class Handler(BaseHTTPRequestHandler):
             ".js": "text/javascript; charset=utf-8",
             ".css": "text/css; charset=utf-8",
             ".json": "application/json",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".ico": "image/x-icon",
         }.get(path.suffix, "application/octet-stream")
-        # no-store: never cache the frontend, so edits always load (avoids stale JS)
-        self._send(200, path.read_bytes(), ctype,
-                   extra={"Cache-Control": "no-store, max-age=0"})
+        # no-store on the code so edits always load (avoids stale JS); the logo is
+        # immutable per build, so let the browser keep it and stop re-fetching it.
+        cache = "public, max-age=86400" if path.suffix in (".png", ".svg", ".ico") \
+            else "no-store, max-age=0"
+        self._send(200, path.read_bytes(), ctype, extra={"Cache-Control": cache})
 
     def _api_plate(self, q):
         dir_arg = (q.get("dir") or [""])[0]
@@ -887,6 +916,7 @@ class Handler(BaseHTTPRequestHandler):
         if not path.is_dir():
             return self._err(400, f"not a folder: {path}")
         Handler.data_root = path
+        _save_settings({"last_data_root": str(path)})  # reopen here next launch
         _open_process_db(path)                        # resolve the DB (Settings/registry/detect)
         active = _DB.get("path")
         if active:                                    # remember this folder feeds the DB
@@ -1065,26 +1095,75 @@ def _serve(host, port, tries=20):
     default port never blocks a fresh launch). Returns (httpd, actual_port)."""
     for p in range(port, port + tries):
         try:
-            return ThreadingHTTPServer((host, p), Handler), p
-        except OSError as e:
+            srv = ThreadingHTTPServer((host, p), Handler)
+            return srv, srv.server_address[1]     # ask the SOCKET, not the loop: port 0
+        except OSError as e:                      # means "any free port", and only the
+            #                                       socket knows which one it got.
             if e.errno == errno.EADDRINUSE:
                 continue
             raise
     sys.exit(f"no free port in {port}..{port + tries - 1} — free one or pass --port")
 
 
+def selftest() -> bool:
+    """Boot the real server on a scratch folder, fetch the pages a browser needs, and
+    say whether the build is alive. This is what CI runs against the FROZEN app: a
+    bundle that compiles but dies on launch is worse than no bundle, and only running
+    the shipped binary catches a missing data file or a broken hidden import."""
+    import tempfile
+    import urllib.request
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        Handler.data_root = Path(tmp)
+        _open_process_db(Handler.data_root)
+        httpd, port = _serve("127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+        checks = [("/", b"PlateNotate"), ("/static/app.js", b"AnnotatorAPI"),
+                  ("/static/style.css", b"--accent"), ("/static/favicon.png", b"PNG"),
+                  ("/api/config", b"data_root"), ("/api/version", b"version")]
+        for path, needle in checks:
+            try:
+                body = urllib.request.urlopen(base + path, timeout=20).read()
+                good = needle in body
+            except Exception as e:                      # noqa: BLE001
+                body, good = b"", False
+                print(f"  FAIL {path}: {type(e).__name__}: {e}")
+            if good:
+                print(f"  ok   {path}  ({len(body)} bytes)")
+            else:
+                ok = False
+                if body:
+                    print(f"  FAIL {path}: served {len(body)} bytes without {needle!r}")
+        # the export engine is imported lazily, so prove it loads inside the bundle too
+        try:
+            import export                              # noqa: F401
+            import compose                             # noqa: F401
+            print("  ok   export engine imports (export + compose)")
+        except Exception as e:                          # noqa: BLE001
+            ok = False
+            print(f"  FAIL export engine: {type(e).__name__}: {e}")
+        httpd.shutdown()
+    print(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version(), flush=True)
+    return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Medaka 3-level image annotator (web).")
     ap.add_argument("plate", nargs="?", default="",
                     help="plate folder name/prefix to open focused (optional)")
-    ap.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT),
-                    help=f"root holding plate folders (default {DEFAULT_DATA_ROOT})")
+    ap.add_argument("--data-root", default=None,
+                    help="root holding plate folders (default: the folder last opened)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="don't auto-open a browser")
+    ap.add_argument("--selftest", action="store_true",
+                    help="boot, fetch the UI and exit 0/1 — the packaged build's smoke test")
     args = ap.parse_args(argv)
 
-    Handler.data_root = Path(args.data_root).resolve()
+    if args.selftest:
+        return 0 if selftest() else 1
+    Handler.data_root = Path(args.data_root or default_data_root()).resolve()
     _open_process_db(Handler.data_root)          # DB-first: one WAL conn for the process
     httpd, port = _serve(args.host, args.port)
     if port != args.port:

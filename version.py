@@ -53,6 +53,39 @@ def git_state(fetch: bool = False) -> dict:
     return out
 
 
+RELEASES_API = "https://api.github.com/repos/Tiagocdt/platenotate/releases/latest"
+RELEASES_PAGE = "https://github.com/Tiagocdt/platenotate/releases/latest"
+
+
+def _as_tuple(v):
+    """'1.2.10' → (1, 2, 10) so 1.2.10 sorts ABOVE 1.2.9 (string compare gets it wrong)."""
+    out = []
+    for part in str(v or "").lstrip("v").split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out or [0])
+
+
+def latest_release(timeout=6) -> dict:
+    """{version, url, newer} for the newest published release, or {} if it can't be
+    reached. This is how the PACKAGED app knows an update exists — it has no git
+    checkout to compare against, so without this its "check for updates" is a dead end.
+    Only ever called on an explicit check: no telemetry, no background polling."""
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(RELEASES_API, headers={"Accept": "application/vnd.github+json",
+                                                            "User-Agent": "PlateNotate"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            tag = (json.load(r) or {}).get("tag_name") or ""
+    except Exception:                                   # noqa: BLE001 — offline is fine
+        return {}
+    if not tag:
+        return {}
+    return {"version": tag.lstrip("v"), "url": RELEASES_PAGE,
+            "newer": _as_tuple(tag) > _as_tuple(version())}
+
+
 def pull() -> dict:
     """Fast-forward the checkout to the upstream branch. {ok, msg} — never rewrites or
     merges: if the copy has local commits or edits, it says so and changes nothing."""
