@@ -114,16 +114,28 @@ def _ordered_prefetch(items, fn, workers, progress=None, lookahead=None):
 
 
 def ffmpeg_exe():
-    """Path to an ffmpeg binary. Preference: $ANNOTATOR_FFMPEG, then imageio-ffmpeg's
-    bundled build, then the system PATH. The bundled build is what makes a frozen
-    desktop app portable — collaborators need no Homebrew/apt ffmpeg installed."""
+    """Path to an ffmpeg binary. Preference: $ANNOTATOR_FFMPEG, the binary frozen INTO
+    this app, then imageio-ffmpeg's own lookup, then the system PATH. The bundled build
+    is what makes a packaged app portable — collaborators need no Homebrew/apt ffmpeg.
+
+    The frozen-bundle path is checked FIRST, by plain file lookup: inside a packaged app
+    the binary is right there next to us, and `get_ffmpeg_exe()` is free to go searching
+    the system (or worse, the network) instead — which on a headless machine is a stall,
+    not an error."""
     env = os.environ.get("ANNOTATOR_FFMPEG")
     if env and Path(env).exists():
         return env
+    base = getattr(sys, "_MEIPASS", None)               # set only in a PyInstaller build
+    if base:
+        bindir = Path(base) / "imageio_ffmpeg" / "binaries"
+        if bindir.is_dir():
+            for p in sorted(bindir.glob("ffmpeg*")):
+                if p.is_file():
+                    return str(p)
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
+    except Exception:                                   # noqa: BLE001
         return shutil.which("ffmpeg") or "ffmpeg"
 
 

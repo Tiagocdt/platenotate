@@ -1119,14 +1119,27 @@ def selftest() -> bool:
     import traceback
     import urllib.request
 
-    lines = []
+    log = Path("platenotate-selftest.log")
+    try:
+        log.write_text("")                              # start clean
+    except OSError:
+        pass
 
     def say(msg):
-        lines.append(msg)
+        """Append EVERY line the moment it happens. A check that hangs (a frozen import
+        that stalls, a library that goes looking on the network) leaves a log ending at
+        the exact step it died on — a report written only at the end would be empty,
+        which is precisely how the first Windows failure hid itself."""
         try:
             sys.stderr.write(msg + "\n")
             sys.stderr.flush()
         except Exception:                               # noqa: BLE001 — no stderr either
+            pass
+        try:
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write(msg + "\n")
+                fh.flush()
+        except OSError:
             pass
 
     ok = True
@@ -1139,7 +1152,6 @@ def selftest() -> bool:
             threading.Thread(target=httpd.serve_forever, daemon=True).start()
         except Exception:                               # noqa: BLE001
             say("FAIL server did not start:\n" + traceback.format_exc())
-            _write_selftest_log(lines)
             return False
         base = f"http://127.0.0.1:{port}"
         checks = [("/", b"PlateNotate"), ("/static/app.js", b"AnnotatorAPI"),
@@ -1177,17 +1189,7 @@ def selftest() -> bool:
         httpd.shutdown()
         httpd.server_close()
     say(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version())
-    _write_selftest_log(lines)
     return ok
-
-
-def _write_selftest_log(lines):
-    """Drop the report next to the working directory so CI can print it even when the
-    process had no usable stdout/stderr at all."""
-    try:
-        Path("platenotate-selftest.log").write_text("\n".join(lines) + "\n")
-    except OSError:
-        pass
 
 
 def main(argv=None):

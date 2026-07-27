@@ -4,6 +4,21 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.2.3] — 2026-07-27
+
+### Windows: find the bundled ffmpeg by path, and log the selftest as it happens
+
+The Windows smoke test stalled past a 4-minute bound with an empty report, so it was
+impossible to say which check hung. Two changes:
+
+- **The selftest log is written incrementally**, one line at a time, flushed. A hung
+  check now leaves a log ending on the exact step that died — a report assembled only at
+  the end is empty, which is how the first Windows failure hid itself twice.
+- **`ffmpeg_exe()` looks inside the frozen bundle first**, by plain file lookup, before
+  calling `imageio_ffmpeg.get_ffmpeg_exe()`. Inside a packaged app the binary sits right
+  next to us, while the library's own lookup is free to go searching the system — which
+  on a headless machine is a stall rather than an error.
+
 ## [1.2.2] — 2026-07-27
 
 ### Fixed — the Windows smoke test hung instead of failing
