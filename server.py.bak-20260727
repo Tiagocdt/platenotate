@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import sys
 import errno
@@ -181,44 +180,25 @@ def _save_settings(patch: dict) -> dict:
 
 
 def _resolve_db_location(data_root: Path):
-    """Find the annotator DB for a plate data-root.
-
-    **The database belongs WITH THE IMAGES.** Opening a folder of plates uses (or
-    creates) the database in that folder — so a folder is self-describing, and moving
-    or sharing it carries its annotations along.
-
-    Priority:
-      1. a REGISTRY LINK for this exact data-root — explicit, per-folder, so a local
-         folder and its SMB twin can be pointed at one shared database on purpose;
-      2. an existing database in the data-root (or its parent);
-      3. a NEW database in the data-root, if it can be written to;
-      4. only if it cannot: `annotations_dir` from Settings, else a local fallback.
-
-    `annotations_dir` used to sit at position 0 and win over everything. That made the
-    LAST folder you saved into follow you to every folder you opened next: you would
-    open a fresh plate folder and still be reading — and writing — the previous
-    database, columns and all. It is now the fallback for a folder you cannot write to
-    (a read-only share), not a default that overrides where the images live.
-
-    Returns (folder_to_create_in, existing_db_path_or_None).
-    """
+    """Find the annotator DB for a plate data-root. Priority: (0) a user-chosen
+    annotations folder in Settings (visible, one shared DB), (1) a REGISTRY LINK (so a
+    local folder and its SMB twin share one DB), (2) an existing DB in the data-root or
+    its parent. Returns (folder_to_create_in, existing_db_path_or_None)."""
     data_root = Path(data_root)
+    adir = (_load_settings().get("annotations_dir") or "").strip()
+    if adir:                                             # explicit visible folder wins
+        folder = Path(adir).expanduser()
+        return folder, db_store.detect_db(folder)
     linked = _registry_lookup(data_root)
-    if linked is not None:                               # explicit, per-folder
+    if linked is not None:
         return linked.parent, linked
-    for folder in (data_root, data_root.parent):         # the images' own folder wins
+    for folder in (data_root, data_root.parent):
         found = db_store.detect_db(folder)
         if found is not None:
             return folder, found
-    # nothing yet: create beside the images (the dir holding AQ-EMBL, if that's the shape)
+    # none found: the canonical home for a new medaka.db is the dir holding AQ-EMBL
     create_folder = data_root.parent if data_root.name == "AQ-EMBL" else data_root
-    if os.access(create_folder, os.W_OK):
-        return create_folder, None
-    adir = (_load_settings().get("annotations_dir") or "").strip()
-    if adir:                                             # can't write next to the images
-        folder = Path(adir).expanduser()
-        return folder, db_store.detect_db(folder)
-    return create_folder, None                           # _autocreate_db falls back locally
+    return create_folder, None
 
 
 def _is_network_fs(path) -> bool:
@@ -363,65 +343,12 @@ class _LRU(OrderedDict):
 
 _PNG_CACHE = _LRU(cap=1500)
 
-# ---------------------------------------------------------------- 16-bit display
-# A 16-bit crop holds physical camera counts (the pipeline's --fl-scale raw16),
-# so the display stretch must be ONE map for the whole plate. Stretching each
-# frame between its own min and max — which this used to do — makes a fading
-# signal look constant and a constant one look like it is changing, i.e. it
-# silently destroys exactly the comparison the images were kept 16-bit for.
-_DISPLAY_RANGE_CACHE: dict = {}
-
-
-def _display_range(path: Path):
-    """(lo, hi) for a 16-bit crop: one constant map per plate, or None.
-
-    Walks up from the crop file looking for the plate's own calibration
-    (`plate_calibration.json` / `plate_metadata.json`) and takes the channel's
-    percentiles. Returns None when there is no calibration to be found, in
-    which case the caller falls back to a per-frame stretch — acceptable for an
-    arbitrary standalone TIFF, never for a time course.
-    """
-    channel = None
-    for p in path.parents:
-        if p.name.startswith("CO") and p.name[2:].isdigit():
-            channel = p.name
-        key = str(p)
-        if key in _DISPLAY_RANGE_CACHE:
-            rng = _DISPLAY_RANGE_CACHE[key]
-            return rng.get(channel) if rng else None
-        found = None
-        for name in ("plate_calibration.json", "plate_metadata.json"):
-            fp = p / name
-            if not fp.exists():
-                continue
-            try:
-                d = json.loads(fp.read_text())
-            except (OSError, ValueError):
-                continue
-            fc = d.get("fluorescence_calibration") or {}
-            cal = (d.get("channel_calibrations") or fc.get("channel_calibrations")
-                   or d.get("fl_calibrations") or fc.get("fl_calibrations") or {})
-            if cal:
-                found = {ch: (v.get("p_low"), v.get("p_high"))
-                         for ch, v in cal.items()
-                         if v.get("p_low") is not None
-                         and v.get("p_high") is not None}
-                break
-        if found is not None:
-            _DISPLAY_RANGE_CACHE[key] = found
-            return found.get(channel)
-        if p.parent == p:
-            break
-    return None
-
 
 def _to_png(path: Path, size: int) -> bytes:
     """Decode a crop to an 8-bit grayscale PNG, longest edge <= ``size`` px.
 
-    8-bit crops pass straight through. 16-bit crops are stretched with the
-    PLATE's constant display range so brightness stays comparable between
-    timepoints and wells; only when no calibration can be found does it fall
-    back to a per-frame min-max."""
+    v2 crops are already 8-bit; the 16-bit branch (min-max stretch) keeps the
+    tool usable on arbitrary scientific TIFFs in the general/flat case."""
     im = Image.open(path)
     im.seek(0)
     if im.mode not in ("L", "I;16", "I", "F", "RGB", "RGBA"):
@@ -429,11 +356,7 @@ def _to_png(path: Path, size: int) -> bytes:
     if im.mode in ("I;16", "I", "F"):
         import numpy as np
         a = np.asarray(im).astype("float32")
-        rng = _display_range(path)
-        if rng:
-            lo, hi = float(rng[0]), float(rng[1])
-        else:
-            lo, hi = float(a.min()), float(a.max())
+        lo, hi = float(a.min()), float(a.max())
         a = (a - lo) / (hi - lo) * 255.0 if hi > lo else a * 0
         im = Image.fromarray(a.clip(0, 255).astype("uint8"), "L")
     elif im.mode in ("RGB", "RGBA"):
@@ -508,95 +431,25 @@ def _evict_cache(cap: int = _CACHE_CAP_BYTES):
             pass
 
 
-# ---- prefetch: ONE bounded, cancellable pool for the whole process ----------------
-# Every well selection used to spawn its own thread with a 20-worker pool and no way to
-# stop it. Clicking through a plate stacked hundreds of concurrent reads onto a share
-# that is already the bottleneck — which is how a slow mount took the whole app down.
-# Now: one pool, a fixed ceiling, and a generation counter that makes queued work for
-# a well you have already navigated away from evaporate instead of running.
-_PREFETCH_WORKERS = 12
-_PREFETCH = {"gen": 0, "pool": None}
-_PREFETCH_LOCK = threading.Lock()
-
-
-def _prefetch_pool():
-    from concurrent.futures import ThreadPoolExecutor
-    if _PREFETCH["pool"] is None:
-        _PREFETCH["pool"] = ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS,
-                                               thread_name_prefix="prefetch")
-    return _PREFETCH["pool"]
-
-
-def _focus_z_map(plate_id: str, well: str, tps):
-    """{tp: z} the VIEWER will ask for — the `slice` keyframes forward-filled, exactly
-    as the client's sliceAt() does. Prefetching the middle slice instead was a silent
-    100% cache miss on every well that has focus keyframes: the frames warmed were not
-    the frames requested, so playback re-read each one from the share."""
-    try:
-        rows = []
-        if _DB["conn"] is not None:
-            with _DB_LOCK:
-                rows = _DB["conn"].execute(
-                    'SELECT timepoint, value FROM image_annotation '
-                    'WHERE plate_id=? AND well=? AND "column"=? ORDER BY timepoint',
-                    (db_store.canon_plate(plate_id), well, "slice")).fetchall()
-    except Exception:                                   # noqa: BLE001
-        rows = []
-    anchors = []
-    for t, v in rows:
-        try:
-            anchors.append((int(t), int(str(v).strip())))
-        except (TypeError, ValueError):
-            pass
-    if not anchors:
-        return {}
-    out, i, cur = {}, 0, None
-    for tp in sorted(tps):
-        while i < len(anchors) and anchors[i][0] <= tp:
-            cur = anchors[i][1]
-            i += 1
-        if cur is not None:
-            out[tp] = cur
-    return out
-
-
-def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
-                   start_tp: int = None, gen: int = 0):
-    """Warm the frame cache for one well (detection + first signal channel, at display
-    size), at the z each timepoint will actually be shown with, ordered OUTWARD FROM THE
-    FRAME YOU ARE ON — so playback stays ahead of the reads instead of racing them."""
+def _prefetch_well(man: dict, well: str, size: int):
+    """Warm the frame cache for one well's browsable frames (detection + first signal
+    channel, at display size) IN PARALLEL — so scrubbing over a slow share is instant.
+    Runs in a background thread; the slow reads happen here, off the UI's path."""
     entry = (man.get("_well_index") or {}).get(well)
     if not entry:
         return
     chans = man.get("channels", [])
     det = man.get("detect_channel") or (chans[0] if chans else None)
     order = ([det] if det else []) + [c for c in chans if c != det]
-    jobs = []
+    paths = []
     for ch in order[:2]:
-        tps = list((man.get("frames", {}).get(well, {}) or {}).get(ch, []))
-        zmap = _focus_z_map(plate_id, well, tps) if plate_id else {}
-        if start_tp is not None and tps:                # nearest-first: play order
-            tps.sort(key=lambda t: (abs(t - start_tp), t))
-        for tp in tps:
-            fp = _frame_path(man, well, ch, tp, zmap.get(tp))
+        for tp in (man.get("frames", {}).get(well, {}) or {}).get(ch, []):
+            fp = _frame_path(man, well, ch, tp)      # default view (middle slice)
             if fp is not None:
-                jobs.append(fp)
-
-    def one(fp):
-        if gen != _PREFETCH["gen"]:                     # a newer well was selected
-            return
-        try:
-            _cached_png(fp, size)
-        except OSError:                                 # share vanished mid-read: the
-            pass                                        # UI must not care, and must not stall
-    pool = _prefetch_pool()
-    for fp in jobs:
-        if gen != _PREFETCH["gen"]:
-            break
-        try:
-            pool.submit(one, fp)
-        except RuntimeError:                            # pool shutting down
-            break
+                paths.append(fp)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=20) as ex:      # oversubscribe to hide share latency
+        list(ex.map(lambda p: _cached_png(p, size), paths))
 
 
 # ------------------------------------------------------------------ plate cache
@@ -984,19 +837,9 @@ class Handler(BaseHTTPRequestHandler):
             size = max(16, min(1024, int((q.get("size") or ["600"])[0])))
         except ValueError:
             size = 600
-        try:
-            start_tp = int((q.get("tp") or ["0"])[0]) or None
-        except ValueError:
-            start_tp = None
         if well:
             man = _manifest(self.data_root, dir_arg)
-            with _PREFETCH_LOCK:
-                _PREFETCH["gen"] += 1                    # everything queued before this dies
-                gen = _PREFETCH["gen"]
-            plate = Path(man["plate_dir"]).name
-            threading.Thread(target=_prefetch_well,
-                             args=(man, well, size, plate, start_tp, gen),
-                             daemon=True).start()
+            threading.Thread(target=_prefetch_well, args=(man, well, size), daemon=True).start()
         self._send(200, {"ok": True})
 
     def _api_frame(self, q):
@@ -1149,46 +992,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(500, f"{type(e).__name__}: {e}")
 
     def _api_settings(self):
-        """Update settings.
-
-        Changing the annotations folder no longer COPIES the current database there.
-        It used to, so that choosing a folder could never silently start an empty DB and
-        hide your existing annotations — but the cure was worse: picking any folder
-        wrote your entire database into it. Pointing the app at a colleague's share put
-        a 355 MB copy of every plate on their server folder, silently.
-
-        Instead the client is TOLD what the new folder holds — an existing database, or
-        none — and copying is an explicit action (`copy_db`) the user asks for.
-        """
+        """Update settings. If the annotations folder changed, the CURRENT database FOLLOWS
+        it there (copied) — so choosing a folder never silently starts an empty DB and
+        hides your existing annotations."""
         try:
             patch = self._read_json_body()
         except json.JSONDecodeError:
             return self._err(400, "invalid JSON body")
         before = (_load_settings().get("annotations_dir") or "").strip()
         cur_db = _DB.get("path")                        # the DB currently in use (has the data)
-        want_copy = bool(patch.pop("copy_db", False))   # explicit "bring my annotations"
         s = _save_settings(patch)
         after = (s.get("annotations_dir") or "").strip()
-        moved, found = None, None
-        if after != before and after:
-            dest = Path(after).expanduser()
-            existing = db_store.detect_db(dest) if dest.is_dir() else None
-            found = str(existing) if existing else None
-            if want_copy and existing is None and cur_db and Path(cur_db).is_file():
+        moved = None
+        if after != before:
+            if after and cur_db and Path(cur_db).is_file():
+                dest = Path(after).expanduser()
                 try:
                     dest.mkdir(parents=True, exist_ok=True)
-                    import shutil
-                    shutil.copy2(cur_db, dest / "medaka.db")
-                    moved = str(dest / "medaka.db")
-                except Exception as e:                  # noqa: BLE001
-                    print(f"  ! could not copy the DB to {after} ({e})", file=sys.stderr)
-        if after != before:
+                    if db_store.detect_db(dest) is None:   # new folder has no DB → bring ours
+                        import shutil
+                        shutil.copy2(cur_db, dest / "medaka.db")
+                        moved = str(dest / "medaka.db")
+                except Exception as e:                     # noqa: BLE001
+                    print(f"  ! could not move DB to {after} ({e})", file=sys.stderr)
             _open_process_db(self.data_root)
-        self._send(200, {"ok": True, "settings": s, "db": _db_info(),
-                         "db_moved_to": moved, "existing_db": found,
-                         # what the client should say: a fresh folder starts EMPTY now
-                         "will_create_new": bool(after and after != before and not found
-                                                 and not moved)})
+        self._send(200, {"ok": True, "settings": s, "db": _db_info(), "db_moved_to": moved})
 
     def _api_pick_folder(self):
         """Native folder picker (desktop app only). The pywebview bridge normally handles

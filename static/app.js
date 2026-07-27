@@ -1025,9 +1025,11 @@ function clampFrame(){ const n = curTps().length; if (!n){ state.frameIdx = 0; r
 function curTp(){ const t = curTps(); return t.length ? t[state.frameIdx] : null; }
 // Warm the server-side cache for this well's frames in the background (fire-and-forget),
 // so scrubbing over a slow share is fast. Fires once per well change.
-function prefetchWell(well){
+function prefetchWell(well, tp){
   if (!well || !state.plateDir) return;
-  jget(`/api/prefetch?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}&size=600`).catch(() => {});
+  const at = tp != null ? tp : (curTp() || 0);
+  jget(`/api/prefetch?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}`
+       + `&size=600&tp=${at}`).catch(() => {});
 }
 function renderDetail(){
   $('#detailWell').textContent = state.primary || '—';

@@ -4,6 +4,46 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.3.0] — 2026-07-27
+
+### The database belongs with the images
+
+Opening a folder of plates now uses — or creates — the database **in that folder**.
+
+`annotations_dir` (the folder you last saved into) used to win over everything, so it
+followed you: open a fresh plate folder and you were still reading, and writing, the
+previous database. It is now the fallback for a folder you *cannot write to* (a
+read-only share), not an override of where the images live. A registry link, being an
+explicit per-folder choice, still wins.
+
+**A new folder now gets a genuinely new, empty database** — no inherited columns.
+
+### Changing the annotations folder no longer copies your database into it
+
+It used to copy silently, so that choosing a folder could never hide your existing
+annotations. The cure was worse than the disease: pointing the app at a colleague's
+network share wrote **a 355 MB copy of every plate** into their folder, with no prompt
+and no mention. Copying is now an explicit request (`copy_db`); otherwise the client is
+simply told whether the new folder already has a database or will get a fresh one.
+
+### The frame cache was warming the wrong frames
+
+Playback stalled on a slow share not because there was no cache, but because the cache
+warmed the **middle** z-slice while the viewer asks for the slice your `slice` keyframes
+forward-fill to. On any well with focus annotations the hit rate was **zero** — every
+frame was re-read from the share.
+
+- Prefetch now resolves the same z per timepoint the viewer will request.
+- It warms **outward from the frame you are on**, so playback runs ahead of the reads
+  instead of racing them.
+- **One bounded, shared pool** (12 workers) replaces a new 20-worker pool per well
+  selection with no way to stop it — clicking through a plate used to stack hundreds of
+  concurrent reads onto the very share that was already the bottleneck, which is how a
+  slow mount took the whole app down. Work queued for a well you have navigated away
+  from is now dropped instead of run.
+- A share that disappears mid-read is survivable: the prefetcher swallows the I/O error
+  rather than propagating it.
+
 ## [1.2.4] — 2026-07-27
 
 ### Windows: teardown can no longer hang the build
