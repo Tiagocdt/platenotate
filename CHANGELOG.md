@@ -4,6 +4,20 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.2.2] — 2026-07-27
+
+### Fixed — the Windows smoke test hung instead of failing
+
+With `Start-Process -Wait` the windowed `.exe` never returned, stalling the job. A
+headless runner has nobody to dismiss a PyInstaller crash dialog, and a GUI-subsystem
+process gives PowerShell nothing to wait on. The step is now **bounded** (`WaitForExit`
+with a timeout, kill on hang, `timeout-minutes` as a backstop) and judges the run by the
+`selftest: PASS` line in the log the app writes itself — so a hang fails fast and says
+so, instead of burning the job.
+
+`--selftest` also now closes the server socket and exits through `os._exit`, so no
+lingering thread or GUI runtime can keep the process alive after the check is done.
+
 ## [1.2.1] — 2026-07-27
 
 ### Fixed — the Windows build's smoke test could not report anything

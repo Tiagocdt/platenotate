@@ -42,6 +42,7 @@ jobs:
       # server is started headless out of the SAME frozen tree that ships.
       - name: Smoke test (macOS/Linux)
         if: runner.os != 'Windows'
+        timeout-minutes: 8
         shell: bash
         run: |
           exe=$(ls dist/PlateNotate.app/Contents/MacOS/PlateNotate 2>/dev/null || ls dist/PlateNotate/PlateNotate)
@@ -50,13 +51,28 @@ jobs:
           exit $rc
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
-        # A GUI-subsystem exe does not block PowerShell and has no usable stdout, so
-        # run it with -Wait and read the exit code off the process object.
+        timeout-minutes: 8
+        # A windowed .exe neither blocks PowerShell nor has a usable stdout, and on a
+        # headless runner a PyInstaller crash dialog would wait forever for a click. So:
+        # start it, wait a BOUNDED time, kill it if it hangs, and judge by the log file
+        # the app writes itself. A hang fails the step instead of stalling the job.
         run: |
           $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe `
-                             -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow
-          if (Test-Path platenotate-selftest.log) { Get-Content platenotate-selftest.log }
-          exit $p.ExitCode
+                             -ArgumentList '--selftest' -PassThru
+          if (-not $p.WaitForExit(240000)) {
+            Write-Host "::error::selftest did not exit within 240s — killing it"
+            try { $p.Kill() } catch {}
+            if (Test-Path platenotate-selftest.log) { Get-Content platenotate-selftest.log }
+            exit 1
+          }
+          if (Test-Path platenotate-selftest.log) {
+            Get-Content platenotate-selftest.log
+            if ((Get-Content platenotate-selftest.log -Raw) -match 'selftest: PASS') { exit 0 }
+            Write-Host "::error::selftest reported a failure (see the log above)"
+            exit 1
+          }
+          Write-Host "::error::the app produced no selftest log (exit code $($p.ExitCode))"
+          exit 1
 
       - name: Package (macOS)
         if: runner.os == 'macOS'

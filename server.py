@@ -1175,6 +1175,7 @@ def selftest() -> bool:
             ok = False
             say("  FAIL ffmpeg lookup:\n" + traceback.format_exc())
         httpd.shutdown()
+        httpd.server_close()
     say(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version())
     _write_selftest_log(lines)
     return ok

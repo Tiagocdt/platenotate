@@ -15,6 +15,7 @@ Package into a transferable .app / .exe with PyInstaller — see DESKTOP.md.
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
@@ -51,7 +52,13 @@ def main(argv=None):
     # app's entry point, so it is what CI can actually run, and webview.start() would
     # block forever on a machine with no display.
     if "--selftest" in argv:
-        return 0 if server.selftest() else 1
+        ok = server.selftest()
+        # os._exit, not return: this is a throwaway check, and the GUI toolkit or a
+        # lingering thread must never be able to hold the process open. On a headless
+        # Windows runner a hung selftest is indistinguishable from a hung app.
+        sys.stdout.flush() if sys.stdout else None
+        sys.stderr.flush() if sys.stderr else None
+        os._exit(0 if ok else 1)
     positional = [a for a in argv if not a.startswith("-")]
     data_root = (Path(positional[0]).expanduser().resolve() if positional
                  else server.default_data_root())
