@@ -94,7 +94,10 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # always(): publish whatever DID build. One platform failing must not withhold the
+    # working builds from everyone else — a missing asset is obvious in the release,
+    # while no release at all just looks like the project is dead.
+    if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -102,7 +105,15 @@ jobs:
           path: downloads
           merge-multiple: true
       - name: List what will be published
-        run: ls -la downloads/
+        run: |
+          ls -la downloads/
+          if [ -z "$(ls -A downloads/ 2>/dev/null)" ]; then
+            echo "::error::no build succeeded — nothing to release"; exit 1
+          fi
+          for os in macOS Windows Linux; do
+            ls downloads/ | grep -q "$os" \
+              || echo "::warning::no $os build in this release (that platform failed)"
+          done
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:

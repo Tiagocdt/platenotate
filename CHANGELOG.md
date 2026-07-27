@@ -4,6 +4,29 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.2.4] — 2026-07-27
+
+### Windows: teardown can no longer hang the build
+
+With the log now written line by line, the Windows failure was finally legible: **every
+check passed** — all six URLs, all nine imports, ffmpeg resolved to the bundled binary —
+and the process then hung in *teardown*, after the last check and before the verdict.
+
+The scratch folder still held the open SQLite file, so cleaning it up raised; and in a
+**windowed** Windows build an unhandled exception opens a PyInstaller crash dialog,
+which on a headless runner waits forever for a click nobody can give. Teardown is now
+incapable of raising: `mkdtemp` + `rmtree(ignore_errors=True)` instead of
+`TemporaryDirectory`, the database connection is closed first, each teardown step is
+individually guarded, and the whole selftest body is wrapped so no exception can ever
+reach a dialog. HTTP responses are read inside a `with` so no handler thread lingers.
+
+### The release no longer depends on every platform succeeding
+
+`release` now runs with `always()`: a tag publishes whatever **did** build, and warns in
+the log about any platform that didn't. One platform failing must not withhold the
+working builds from everyone else — a missing asset is visible in the release, while no
+release at all just looks like the project is dead.
+
 ## [1.2.3] — 2026-07-27
 
 ### Windows: find the bundled ffmpeg by path, and log the selftest as it happens

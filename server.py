@@ -1115,6 +1115,7 @@ def selftest() -> bool:
     build has ``sys.stdout is None``, and CPython's ``print`` silently discards output
     in that case — so a stdout-only report would leave a failing build undiagnosable.
     """
+    import shutil
     import tempfile
     import traceback
     import urllib.request
@@ -1144,7 +1145,13 @@ def selftest() -> bool:
 
     ok = True
     say(f"PlateNotate selftest — v{version.version()}  frozen={FROZEN}  {sys.platform}")
-    with tempfile.TemporaryDirectory() as tmp:
+    # mkdtemp + ignore_errors, NOT TemporaryDirectory: on Windows the scratch folder
+    # still holds the open SQLite file, and a cleanup that raises inside a WINDOWED
+    # build opens a PyInstaller crash dialog — which on a headless runner waits for a
+    # click that never comes. Teardown here must be incapable of raising.
+    tmp = tempfile.mkdtemp(prefix="platenotate-selftest-")
+    httpd = None
+    try:
         Handler.data_root = Path(tmp)
         try:
             _open_process_db(Handler.data_root)
@@ -1159,8 +1166,9 @@ def selftest() -> bool:
                   ("/api/config", b"data_root"), ("/api/version", b"version")]
         for path, needle in checks:
             try:
-                body = urllib.request.urlopen(base + path, timeout=20).read()
-                if needle in body:
+                with urllib.request.urlopen(base + path, timeout=20) as r:
+                    body = r.read()                     # `with`: release the socket, so
+                if needle in body:                      # no handler thread lingers
                     say(f"  ok   {path}  ({len(body)} bytes)")
                 else:
                     ok = False
@@ -1181,13 +1189,24 @@ def selftest() -> bool:
         try:
             import well_hyperstack as _wh
             ff = _wh.ffmpeg_exe()
-            say(f"  {'ok  ' if Path(ff).exists() else 'FAIL'} ffmpeg: {ff}")
-            ok = ok and Path(ff).exists()
+            here = Path(ff).exists()
+            say(f"  {'ok  ' if here else 'FAIL'} ffmpeg: {ff}")
+            ok = ok and here
         except Exception:                               # noqa: BLE001
             ok = False
             say("  FAIL ffmpeg lookup:\n" + traceback.format_exc())
-        httpd.shutdown()
-        httpd.server_close()
+    except Exception:                                   # noqa: BLE001 — never a dialog
+        ok = False
+        say("FAIL unexpected:\n" + traceback.format_exc())
+    finally:
+        say("  …tearing down")
+        for step, fn in (("http shutdown", lambda: httpd and httpd.shutdown()),
+                         ("db close", lambda: _DB["conn"] and _DB["conn"].close()),
+                         ("tmp cleanup", lambda: shutil.rmtree(tmp, ignore_errors=True))):
+            try:
+                fn()
+            except Exception as e:                      # noqa: BLE001
+                say(f"  (ignored during {step}: {type(e).__name__}: {e})")
     say(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version())
     return ok
 
