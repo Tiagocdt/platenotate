@@ -1109,15 +1109,38 @@ def selftest() -> bool:
     """Boot the real server on a scratch folder, fetch the pages a browser needs, and
     say whether the build is alive. This is what CI runs against the FROZEN app: a
     bundle that compiles but dies on launch is worse than no bundle, and only running
-    the shipped binary catches a missing data file or a broken hidden import."""
+    the shipped binary catches a missing data file or a broken hidden import.
+
+    Every line goes to STDERR and to a log file, never to stdout: a windowed Windows
+    build has ``sys.stdout is None``, and CPython's ``print`` silently discards output
+    in that case — so a stdout-only report would leave a failing build undiagnosable.
+    """
     import tempfile
+    import traceback
     import urllib.request
+
+    lines = []
+
+    def say(msg):
+        lines.append(msg)
+        try:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+        except Exception:                               # noqa: BLE001 — no stderr either
+            pass
+
     ok = True
+    say(f"PlateNotate selftest — v{version.version()}  frozen={FROZEN}  {sys.platform}")
     with tempfile.TemporaryDirectory() as tmp:
         Handler.data_root = Path(tmp)
-        _open_process_db(Handler.data_root)
-        httpd, port = _serve("127.0.0.1", 0)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            _open_process_db(Handler.data_root)
+            httpd, port = _serve("127.0.0.1", 0)
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        except Exception:                               # noqa: BLE001
+            say("FAIL server did not start:\n" + traceback.format_exc())
+            _write_selftest_log(lines)
+            return False
         base = f"http://127.0.0.1:{port}"
         checks = [("/", b"PlateNotate"), ("/static/app.js", b"AnnotatorAPI"),
                   ("/static/style.css", b"--accent"), ("/static/favicon.png", b"PNG"),
@@ -1125,27 +1148,45 @@ def selftest() -> bool:
         for path, needle in checks:
             try:
                 body = urllib.request.urlopen(base + path, timeout=20).read()
-                good = needle in body
+                if needle in body:
+                    say(f"  ok   {path}  ({len(body)} bytes)")
+                else:
+                    ok = False
+                    say(f"  FAIL {path}: served {len(body)} bytes without {needle!r}")
             except Exception as e:                      # noqa: BLE001
-                body, good = b"", False
-                print(f"  FAIL {path}: {type(e).__name__}: {e}")
-            if good:
-                print(f"  ok   {path}  ({len(body)} bytes)")
-            else:
                 ok = False
-                if body:
-                    print(f"  FAIL {path}: served {len(body)} bytes without {needle!r}")
-        # the export engine is imported lazily, so prove it loads inside the bundle too
+                say(f"  FAIL {path}: {type(e).__name__}: {e}")
+        # the export engine is imported lazily at runtime, so prove it loads in the
+        # bundle too — a missing hiddenimport only shows up when someone hits Export
+        for mod in ("export", "compose", "well_hyperstack", "focus_cut", "annotations",
+                    "build_db", "imagecodecs", "tifffile", "imageio_ffmpeg"):
+            try:
+                __import__(mod)
+                say(f"  ok   import {mod}")
+            except Exception:                           # noqa: BLE001
+                ok = False
+                say(f"  FAIL import {mod}:\n" + traceback.format_exc())
         try:
-            import export                              # noqa: F401
-            import compose                             # noqa: F401
-            print("  ok   export engine imports (export + compose)")
-        except Exception as e:                          # noqa: BLE001
+            import well_hyperstack as _wh
+            ff = _wh.ffmpeg_exe()
+            say(f"  {'ok  ' if Path(ff).exists() else 'FAIL'} ffmpeg: {ff}")
+            ok = ok and Path(ff).exists()
+        except Exception:                               # noqa: BLE001
             ok = False
-            print(f"  FAIL export engine: {type(e).__name__}: {e}")
+            say("  FAIL ffmpeg lookup:\n" + traceback.format_exc())
         httpd.shutdown()
-    print(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version(), flush=True)
+    say(("selftest: PASS v" if ok else "selftest: FAIL v") + version.version())
+    _write_selftest_log(lines)
     return ok
+
+
+def _write_selftest_log(lines):
+    """Drop the report next to the working directory so CI can print it even when the
+    process had no usable stdout/stderr at all."""
+    try:
+        Path("platenotate-selftest.log").write_text("\n".join(lines) + "\n")
+    except OSError:
+        pass
 
 
 def main(argv=None):

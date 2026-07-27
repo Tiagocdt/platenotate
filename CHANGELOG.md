@@ -4,6 +4,26 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.2.1] — 2026-07-27
+
+### Fixed — the Windows build's smoke test could not report anything
+
+The v1.2.0 tag built cleanly on all three platforms, but the Windows smoke test exited
+non-zero with an empty report, so the release job never ran. Two causes, both about
+*seeing* the failure rather than the app itself (Windows served all six URLs fine):
+
+- A windowed Windows build has `sys.stdout is None`, and CPython's `print` **silently
+  discards** output in that case — so the entire selftest report vanished.
+  It now writes to stderr *and* to `platenotate-selftest.log`, which CI prints.
+- A GUI-subsystem `.exe` does not block PowerShell, so `$LASTEXITCODE` was not the
+  app's exit code. CI now uses `Start-Process -Wait -PassThru` and reads `.ExitCode`.
+
+The selftest also got stricter while it was being fixed: it now imports every module
+the app loads lazily (`export`, `compose`, `well_hyperstack`, `focus_cut`,
+`annotations`, `build_db`, `imagecodecs`, `tifffile`, `imageio_ffmpeg`), reports a full
+traceback for any that fail, and checks the bundled ffmpeg binary is really there —
+which is exactly the class of breakage that only appears inside a frozen bundle.
+
 ## [1.2.0] — 2026-07-27
 
 ### A real app you download and double-click

@@ -45,12 +45,18 @@ jobs:
         shell: bash
         run: |
           exe=$(ls dist/PlateNotate.app/Contents/MacOS/PlateNotate 2>/dev/null || ls dist/PlateNotate/PlateNotate)
-          "$exe" --selftest
+          set +e; "$exe" --selftest; rc=$?; set -e
+          [ -f platenotate-selftest.log ] && cat platenotate-selftest.log
+          exit $rc
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
+        # A GUI-subsystem exe does not block PowerShell and has no usable stdout, so
+        # run it with -Wait and read the exit code off the process object.
         run: |
-          dist\PlateNotate\PlateNotate.exe --selftest
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe `
+                             -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow
+          if (Test-Path platenotate-selftest.log) { Get-Content platenotate-selftest.log }
+          exit $p.ExitCode
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
