@@ -130,6 +130,50 @@ try:
     finally:
         server._cached_png = real_cached
 
+    # ---- TIERS: browsing needs one plane per timepoint, focus work needs the stack ----
+    ran = []
+    real_cached = server._cached_png
+    server._cached_png = lambda fp, size: (ran.append(fp), (b"", "image/jpeg"))[1]
+    try:
+        def warm(depth):
+            ran.clear()
+            with server._PREFETCH_LOCK:
+                server._PREFETCH["gen"] += 1
+                gen = server._PREFETCH["gen"]
+            server._prefetch_well(man, "A01", 600, plate, 3, gen, depth)
+            server._prefetch_pool().shutdown(wait=True)
+            server._PREFETCH["pool"] = None
+            return list(ran)
+
+        view = warm("view")
+        stack = warm("stack")
+        check(len(view) == len(tps),
+              f"depth=view warms ONE plane per timepoint ({len(view)} for {len(tps)} tps)")
+        check(len({Path(f).parent.name for f in view}) >= 1 and len(stack) > len(view),
+              f"depth=stack warms more than view ({len(stack)} vs {len(view)})")
+        check(len({Path(f).parent.name for f in stack}) == 3,
+              f"depth=stack covers every z-slice (got "
+              f"{sorted({Path(f).parent.name for f in stack})})")
+        check(len(set(stack)) == len(stack), "depth=stack queues no duplicate files")
+        # the whole point: browsing costs a fraction of the stack
+        check(len(view) * 2 <= len(stack),
+              f"browsing reads a fraction of the focus-work volume "
+              f"({len(view)} vs {len(stack)} files)")
+    finally:
+        server._cached_png = real_cached
+
+    # ---- cache sizing is configurable and honest -------------------------------
+    server._save_settings({"cache_gb": 20, "cache_lossless": False, "cache_quality": 88})
+    cap, lossless, q = server._cache_settings()
+    check(abs(cap - 20 * 1024 ** 3) < 1 and not lossless and q == 88,
+          "the cache cap / format / quality come from settings")
+    server._save_settings({"cache_lossless": True})
+    check(server._cache_settings()[1] is True, "lossless (PNG) can be turned back on")
+    server._save_settings({"cache_lossless": False})
+    u = server.cache_usage()
+    check(set(u) == {"bytes", "files", "cap_bytes"},
+          f"cache usage reports what is held and the cap (got {sorted(u)})")
+
     # ---- the pool is bounded ---------------------------------------------------
     check(server._PREFETCH_WORKERS <= 16,
           f"the prefetch pool is bounded ({server._PREFETCH_WORKERS} workers, shared)")

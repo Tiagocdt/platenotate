@@ -1025,16 +1025,39 @@ function clampFrame(){ const n = curTps().length; if (!n){ state.frameIdx = 0; r
 function curTp(){ const t = curTps(); return t.length ? t[state.frameIdx] : null; }
 // Warm the server-side cache for this well's frames in the background (fire-and-forget),
 // so scrubbing over a slow share is fast. Fires once per well change.
-function prefetchWell(well, tp){
+// Warming is TIERED, because the two things you do with a well need different data:
+//   'view'  — one plane per timepoint (the slice each frame is displayed at). Browsing
+//             and playing a trajectory need only this, and it is ~1/nz of the reads.
+//   'stack' — plus the z-slices around where you are, for setting focus keyframes.
+// 'stack' is requested when you actually reach for focus (the z fader / its record
+// button), and after dwelling on one well — not up front for every well you glance at.
+function prefetchWell(well, tp, depth){
   if (!well || !state.plateDir) return;
   const at = tp != null ? tp : (curTp() || 0);
   jget(`/api/prefetch?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}`
-       + `&size=600&tp=${at}`).catch(() => {});
+       + `&size=600&tp=${at}&depth=${depth || 'view'}`).catch(() => {});
+}
+// escalate to the z-stack: on demand (touching focus) or after dwelling on one well
+function prefetchStack(){
+  if (!state.primary) return;
+  if (state._pfStack === state.primary) return;          // already asked for this well
+  state._pfStack = state.primary;
+  prefetchWell(state.primary, curTp(), 'stack');
+}
+function armDwellPrefetch(){
+  clearTimeout(state._dwellTimer);
+  state._dwellTimer = setTimeout(() => {
+    if (state.primary) prefetchStack();                  // still here after a while
+  }, 20000);
 }
 function renderDetail(){
   $('#detailWell').textContent = state.primary || '—';
   $$('.chBtn').forEach(b => b.classList.toggle('active', b.dataset.ch === state.channel));
-  if (state.primary && state.primary !== state._pfWell){ state._pfWell = state.primary; prefetchWell(state.primary); }
+  if (state.primary && state.primary !== state._pfWell){
+    state._pfWell = state.primary; state._pfStack = null;
+    prefetchWell(state.primary);                         // tier 1: the displayed plane
+    armDwellPrefetch();                                  // tier 3: z-stack if you stay
+  }
   const tps = curTps();
   const scrub = $('#scrub');
   scrub.max = Math.max(0, tps.length - 1); scrub.value = state.frameIdx;
@@ -1227,6 +1250,29 @@ function renderSettings(body){
   const hb = elt('button', 'btn sm', 'Keyboard shortcuts & help');
   hb.onclick = () => { const h = $('#help'); if (h) h.hidden = false; };
   s4.appendChild(hb);
+
+  // ---- image cache ---------------------------------------------------------
+  // Frames are cached on local disk so a share is read ONCE. The size that matters is
+  // per well: at ~64 KB a frame, one 700-timepoint well is ~45 MB, so a 20 GB cache
+  // holds hundreds of wells — the old 4 GB of PNGs held about 32 and thrashed.
+  const scache = sec('Image cache', 'Frames already looked at are kept on this computer, so a network share is read once.');
+  const cinfo = elt('div', 'muted mono', 'checking…');
+  scache.appendChild(cinfo);
+  const crow = elt('div', 'inline'); crow.style.marginTop = '6px';
+  const cap = elt('input'); cap.type = 'number'; cap.min = '1'; cap.style.width = '5em';
+  cap.value = s.cache_gb != null ? s.cache_gb : 20;
+  cap.onchange = () => { s.cache_gb = Math.max(1, Number(cap.value) || 20); push(); };
+  const loss = elt('input'); loss.type = 'checkbox'; loss.checked = !!s.cache_lossless;
+  loss.onchange = () => { s.cache_lossless = loss.checked; push(); };
+  const ll = elt('label'); ll.appendChild(loss);
+  ll.appendChild(document.createTextNode(' lossless (bigger, exact pixels)'));
+  crow.append(elt('span', 'muted', 'limit'), cap, elt('span', 'muted', 'GB'), ll);
+  scache.appendChild(crow);
+  jget('/api/cache').then(u => {
+    const gb = (u.bytes || 0) / 1073741824;
+    cinfo.textContent = `${gb.toFixed(1)} GB in ${(u.files || 0).toLocaleString()} frames`
+      + ` · limit ${((u.cap_bytes || 0) / 1073741824).toFixed(0)} GB`;
+  }).catch(() => { cinfo.textContent = 'unavailable'; });
 
   // ---- version + update ----------------------------------------------------
   // run.sh already fast-forwards on launch; this is for when the app has been open a
@@ -2027,11 +2073,17 @@ function wireStatic(){
   $scrub.addEventListener('pointerdown', () => { state.arrowMode = 'frame'; });   // ← → now step frames
   $scrub.onchange = () => { if (!state.playing) syncGridToDetail(); };            // release → move all thumbnails here
   { const zsl = $('#zslider'); if (zsl){
-      zsl.addEventListener('pointerdown', () => { state.arrowMode = 'z'; });        // ← → now nudge focus
+      zsl.addEventListener('pointerdown', () => {
+        state.arrowMode = 'z';                                                     // ← → now nudge focus
+        prefetchStack();          // reaching for focus = the z-slices are about to be needed
+      });
       zsl.oninput = e => { state.zview = Number(e.target.value); updateBigImg(); updateFrameInfo(); };  // drag = live preview (look)
       zsl.onchange = e => { if (state.zrec) commitSlice(Number(e.target.value)); };                     // release = record ONLY if on
   } }
-  { const zrb = $('#zrec'); if (zrb) zrb.onclick = () => { state.zrec = !state.zrec; updateFaders(); }; }
+  { const zrb = $('#zrec'); if (zrb) zrb.onclick = () => {
+      state.zrec = !state.zrec; updateFaders();
+      if (state.zrec) prefetchStack();     // recording focus keyframes: warm the stack now
+  }; }
   { const rsl = $('#rotslider'); if (rsl){
       rsl.addEventListener('pointerdown', () => { state.arrowMode = 'rotation'; });  // ← → now nudge rotation
       rsl.oninput = e => { state.rotview = Number(e.target.value); updateBigImg(); updateRotslider(); }; // drag = live preview (look)

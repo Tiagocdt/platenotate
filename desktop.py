@@ -70,12 +70,23 @@ def main(argv=None):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
     url = f"http://127.0.0.1:{port}/"
-    print(f"PlateNotate v{version.version()} (desktop)  →  {url}\n  data root: {data_root}", flush=True)
+    # ASCII only: this line ran before the console was ever proven writable, and an
+    # unencodable arrow here is what stopped the Windows app from starting at all.
+    print(f"PlateNotate v{version.version()} (desktop) - {url}", flush=True)
+    print(f"  data root: {data_root}", flush=True)
+
+    if os.environ.get("PLATENOTATE_NO_GUI"):
+        # Everything a real launch does, except opening the window: the banner, the
+        # server, the database. --selftest returns long before this, so without it CI
+        # never touched the code path that actually broke on Windows.
+        print("PLATENOTATE_NO_GUI: launch path OK", flush=True)
+        httpd.shutdown()
+        return 0
 
     bridge = Bridge()
     win = webview.create_window("PlateNotate", url,
                                 width=1440, height=920, min_size=(1024, 720),
-                                background_color="#14161b",   # match the app bg → no white flash on open
+                                background_color="#14161b",   # match the app bg: no white flash
                                 js_api=bridge)
     bridge.window = win
     try:

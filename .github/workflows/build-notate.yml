@@ -74,6 +74,39 @@ jobs:
           Write-Host "::error::the app produced no selftest log (exit code $($p.ExitCode))"
           exit 1
 
+      # ---- the GUI LAUNCH path, headless ----
+      # --selftest exits long before the window is created, so it never touched the
+      # banner/launch code — which is precisely where the Windows build died on a
+      # cp1252 console. This runs the real launch, stopping just short of the window.
+      - name: Launch test (macOS/Linux)
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PLATENOTATE_NO_GUI: "1"
+        run: |
+          exe=$(ls dist/PlateNotate.app/Contents/MacOS/PlateNotate 2>/dev/null || ls dist/PlateNotate/PlateNotate)
+          "$exe"
+      - name: Launch test (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        env:
+          PLATENOTATE_NO_GUI: "1"
+        # chcp 1252 forces the console encoding that broke it, so a regression fails HERE.
+        run: |
+          chcp 1252 | Out-Null
+          $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe -PassThru
+          if (-not $p.WaitForExit(180000)) {
+            Write-Host "::error::the app did not finish its launch path within 180s"
+            try { $p.Kill() } catch {}
+            exit 1
+          }
+          if ($p.ExitCode -ne 0) {
+            Write-Host "::error::the app crashed on launch (exit $($p.ExitCode))"
+            exit 1
+          }
+          Write-Host "launch path OK"
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: cd dist && zip -qry PlateNotate-macOS.zip PlateNotate.app

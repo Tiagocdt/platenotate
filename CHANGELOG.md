@@ -4,6 +4,57 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.4.0] — 2026-07-29
+
+### Fixed — the Windows app would not start at all
+
+```
+Failed to execute script 'desktop' due to unhandled exception:
+'charmap' codec can't encode character '\u2192' in position 30
+```
+
+The launch banner printed an arrow. A Windows console is cp1252, which cannot encode
+one, so `print` raised — and in a windowed build an unhandled exception is a dialog and
+no app. Reproduced locally on a cp1252 stream (same character, same position 30).
+
+- `make_console_safe()` switches the streams to UTF-8 (falling back to
+  `errors="replace"`), so no message can ever stop the app again.
+- The launch banner is plain ASCII, because it runs before anything has proven the
+  console is writable.
+- **CI now runs the GUI launch path** (`PLATENOTATE_NO_GUI=1`), on Windows under
+  `chcp 1252`. `--selftest` returns long before the window is created, so it never
+  touched the code that broke — which is why a green build shipped a dead app.
+
+### The cache holds whole wells now instead of evicting them
+
+Two problems on top of the wrong-frames bug fixed in 1.3.0:
+
+- **A 600 px display PNG is ~183 KB — three quarters of the 243 KB source TIF.** The
+  cache barely compressed anything, so a 4 GB cap held ~32 wells of a single slice and
+  ran permanently full: opening a well evicted the one before it, and going back re-read
+  the whole trajectory from the share. Frames are now JPEG (~51 KB measured, 3.6×
+  smaller). This is a *display* cache — annotations and measurements are stored in image
+  coordinates, which the encoding does not touch — and `lossless` in Settings restores
+  PNG.
+- **The cap is now 20 GB and configurable**, with the cache's real usage shown in
+  Settings. Cached replay measured at 12 ms/frame end-to-end.
+
+### Prefetch is tiered to what you are actually doing
+
+- **Browsing / playing a trajectory** warms ONE plane per timepoint — the slice that
+  frame is displayed at — which is ~1/nz of the reads. Whole well, ordered outward from
+  the frame you are on.
+- **Focus work** warms the z-stack around where you are, requested when you reach for
+  the z fader or arm its record button, and after dwelling ~20 s on one well. Not up
+  front for every well you glance at.
+- Both share the one bounded pool and generation check from 1.3.0, so escalating cannot
+  pile up on the pass before it.
+
+Sources stay as individual crops: the DINO data loader globs `<slice>/*.tif` directly,
+and `build_db`, `gen_frame_metadata`, the segmentation tools, egg-motion and the
+embedding explorer all address crops by path. Packing wells into single TIFs would break
+that for a first-visit gain the tiering already recovers.
+
 ## [1.3.0] — 2026-07-27
 
 ### The database belongs with the images

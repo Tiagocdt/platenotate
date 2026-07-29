@@ -45,6 +45,30 @@ import model
 import db_store
 import version
 
+def make_console_safe():
+    """Never let a console message crash the app.
+
+    Windows consoles default to cp1252, which cannot encode the arrows, ellipses, µ and
+    warning signs this codebase prints — and an unencodable character raises
+    UnicodeEncodeError from inside `print`, which in a windowed build surfaces as
+    "Failed to execute script 'desktop'" and no app at all. A launch banner is not worth
+    a crash: switch the streams to UTF-8, and if even that is refused, keep the console's
+    own encoding but replace anything it cannot render.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                  # noqa: BLE001
+            try:
+                stream.reconfigure(errors="replace")       # at least stop it raising
+            except Exception:                              # noqa: BLE001
+                pass
+
+
+make_console_safe()
+
 APP_DIR = Path(__file__).resolve().parent
 FROZEN = getattr(sys, "frozen", False)          # running from a packaged .app / .exe
 # In the source tree, plates live under imaging/data/AQ-EMBL/ (server.py is at
@@ -137,6 +161,9 @@ _SETTINGS_DEFAULTS = {
     "export_dir": "",        # folder for TIF/MP4 exports; "" = next to the plate (legacy)
     "filters": {},           # saved cross-plate filters: {name: {plates, constraints, …}}
     "last_data_root": "",    # the folder last opened — a packaged app reopens it
+    "cache_gb": 20,          # on-disk display-frame cache cap
+    "cache_lossless": False, # True = cache PNG instead of JPEG (bigger, exact)
+    "cache_quality": 88,     # JPEG quality when not lossless
 }
 
 
@@ -415,6 +442,19 @@ def _display_range(path: Path):
     return None
 
 
+def _to_jpeg(path: Path, size: int, quality: int = 88) -> bytes:
+    """The same display frame as `_to_png`, JPEG-encoded — ~2.9x smaller, which is what
+    lets the cache hold whole wells instead of evicting them. Display only: annotations
+    and measurements are stored in image coordinates, which the encoding never touches."""
+    png = _to_png(path, size)
+    im = Image.open(io.BytesIO(png))
+    if im.mode not in ("L", "RGB"):
+        im = im.convert("L")
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=int(quality), optimize=True)
+    return out.getvalue()
+
+
 def _to_png(path: Path, size: int) -> bytes:
     """Decode a crop to an 8-bit grayscale PNG, longest edge <= ``size`` px.
 
@@ -452,29 +492,74 @@ def _to_png(path: Path, size: int) -> bytes:
 # Over a slow share, decoding each frame is the bottleneck. We keep the display-res PNG
 # on local disk keyed by (source path + mtime + size), so each frame is fetched/decoded
 # from the share only ONCE; after that it's local. Capped, oldest-evicted.
-_CACHE_CAP_BYTES = 4 * 1024 ** 3          # ~4 GB of display PNGs
+# A 600 px display PNG is ~183 KB — three quarters of the 243 KB source TIF, so the
+# cache barely compressed anything and a 4 GB cap held only ~32 wells of ONE slice.
+# It ran permanently full: every well you opened evicted the one before, so coming back
+# re-read the whole trajectory from the share. JPEG at q88 is ~64 KB for the same frame
+# (2.9x more frames in the same space) and this is a DISPLAY cache — measurements are
+# taken in image coordinates, which JPEG does not touch. Lossless is one setting away.
+_CACHE_DEFAULT_GB = 20
+_CACHE_DEFAULT_QUALITY = 88
 _cache_writes = [0]
+
+
+def _cache_settings():
+    s = _load_settings()
+    try:
+        cap = float(s.get("cache_gb") or _CACHE_DEFAULT_GB)
+    except (TypeError, ValueError):
+        cap = _CACHE_DEFAULT_GB
+    lossless = bool(s.get("cache_lossless"))
+    try:
+        q = int(s.get("cache_quality") or _CACHE_DEFAULT_QUALITY)
+    except (TypeError, ValueError):
+        q = _CACHE_DEFAULT_QUALITY
+    return max(0.5, cap) * 1024 ** 3, lossless, max(50, min(100, q))
 
 
 def _frame_cache_dir() -> Path:
     return Path.home() / ".medaka_annotator" / "framecache"
 
 
-def _cached_png(path: Path, size: int) -> bytes:
+def cache_usage() -> dict:
+    """{bytes, files, cap_bytes} — what the cache is actually holding right now."""
+    d = _frame_cache_dir()
+    total = files = 0
+    if d.is_dir():
+        for f in d.rglob("*.*"):
+            try:
+                total += f.stat().st_size
+                files += 1
+            except OSError:
+                pass
+    cap, _lossless, _q = _cache_settings()
+    return {"bytes": total, "files": files, "cap_bytes": int(cap)}
+
+
+def _cached_png(path: Path, size: int):
+    """The display bytes for one frame, cached on local disk. Returns (bytes, mime).
+
+    Named for history: it serves JPEG unless the lossless setting is on. The cache key
+    carries the format+quality, so flipping that setting cannot serve you a stale image
+    of the other kind."""
     import hashlib
+    cap, lossless, q = _cache_settings()
+    fmt = "png" if lossless else "jpg"
+    mime = "image/png" if lossless else "image/jpeg"
     try:
         mt = int(path.stat().st_mtime)
     except OSError:
         mt = 0
-    key = hashlib.sha1(f"{path}|{mt}|{size}".encode()).hexdigest()
-    fp = _frame_cache_dir() / key[:2] / (key + ".png")
+    tag = "png" if lossless else f"q{q}"
+    key = hashlib.sha1(f"{path}|{mt}|{size}|{tag}".encode()).hexdigest()
+    fp = _frame_cache_dir() / key[:2] / (key + "." + fmt)
     try:
         b = fp.read_bytes()
         fp.touch()                        # LRU: freshen mtime on a hit
-        return b
+        return b, mime
     except OSError:
         pass
-    b = _to_png(path, size)               # the slow share read + decode happens here, once
+    b = _to_png(path, size) if lossless else _to_jpeg(path, size, q)
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
         tmp = fp.with_suffix(".tmp")
@@ -484,15 +569,17 @@ def _cached_png(path: Path, size: int) -> bytes:
             threading.Thread(target=_evict_cache, daemon=True).start()
     except OSError:
         pass
-    return b
+    return b, mime
 
 
-def _evict_cache(cap: int = _CACHE_CAP_BYTES):
+def _evict_cache(cap: int = None):
+    if cap is None:
+        cap, _lossless, _q = _cache_settings()
     d = _frame_cache_dir()
     if not d.is_dir():
         return
     files, total = [], 0
-    for f in d.rglob("*.png"):
+    for f in d.rglob("*.*"):              # both .png and .jpg live here
         try:
             st = f.stat(); files.append((st.st_mtime, st.st_size, f)); total += st.st_size
         except OSError:
@@ -561,10 +648,21 @@ def _focus_z_map(plate_id: str, well: str, tps):
 
 
 def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
-                   start_tp: int = None, gen: int = 0):
-    """Warm the frame cache for one well (detection + first signal channel, at display
-    size), at the z each timepoint will actually be shown with, ordered OUTWARD FROM THE
-    FRAME YOU ARE ON — so playback stays ahead of the reads instead of racing them."""
+                   start_tp: int = None, gen: int = 0, depth: str = "view",
+                   z_window: int = 60):
+    """Warm the frame cache for one well, at the depth the work actually needs.
+
+    depth='view'  — ONE plane per timepoint: the z each frame will be displayed at.
+                    This is what browsing and playing a trajectory needs, and it is
+                    ~1/nz of the reads. Whole-well, ordered outward from the frame you
+                    are on, so playback runs ahead of the reads instead of racing them.
+    depth='stack' — additionally every z-slice within `z_window` timepoints of where you
+                    are, for when you start setting focus keyframes and are stepping
+                    through z rather than through time.
+
+    Both are the same bounded pool and the same generation check, so escalating to
+    'stack' cannot pile up on top of the 'view' pass — the newer request supersedes it.
+    """
     entry = (man.get("_well_index") or {}).get(well)
     if not entry:
         return
@@ -581,12 +679,23 @@ def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
             fp = _frame_path(man, well, ch, tp, zmap.get(tp))
             if fp is not None:
                 jobs.append(fp)
+        if depth == "stack":
+            zs = (man.get("channel_z", {}) or {}).get(ch) or []
+            near = [t for t in tps
+                    if start_tp is None or abs(t - start_tp) <= z_window]
+            for tp in near:                             # the z-stack around where you are
+                for z in zs:
+                    if z == zmap.get(tp):
+                        continue                        # already queued by the view pass
+                    fp = _frame_path(man, well, ch, tp, z)
+                    if fp is not None:
+                        jobs.append(fp)
 
     def one(fp):
         if gen != _PREFETCH["gen"]:                     # a newer well was selected
             return
         try:
-            _cached_png(fp, size)
+            _cached_png(fp, size)          # warms disk; bytes discarded
         except OSError:                                 # share vanished mid-read: the
             pass                                        # UI must not care, and must not stall
     pool = _prefetch_pool()
@@ -907,6 +1016,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._serve_static("index.html")
             if u.path.startswith("/static/"):
                 return self._serve_static(u.path[len("/static/"):])
+            if u.path == "/api/cache":
+                return self._send(200, cache_usage())
             if u.path == "/api/version":
                 return self._send(200, _version_info(q.get("fetch", ["0"])[0] == "1"))
             if u.path == "/api/config":
@@ -988,6 +1099,9 @@ class Handler(BaseHTTPRequestHandler):
             start_tp = int((q.get("tp") or ["0"])[0]) or None
         except ValueError:
             start_tp = None
+        depth = (q.get("depth") or ["view"])[0]
+        if depth not in ("view", "stack"):
+            depth = "view"
         if well:
             man = _manifest(self.data_root, dir_arg)
             with _PREFETCH_LOCK:
@@ -995,7 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
                 gen = _PREFETCH["gen"]
             plate = Path(man["plate_dir"]).name
             threading.Thread(target=_prefetch_well,
-                             args=(man, well, size, plate, start_tp, gen),
+                             args=(man, well, size, plate, start_tp, gen, depth),
                              daemon=True).start()
         self._send(200, {"ok": True})
 
@@ -1016,9 +1130,9 @@ class Handler(BaseHTTPRequestHandler):
             fp = _frame_path(man, well, ch, tp)
         if fp is None or not fp.is_file():
             return self._err(404, f"no frame {well}/{ch}/{tp}")
-        png = _PNG_CACHE.get_or((str(fp), size), lambda: _cached_png(fp, size))   # RAM → disk → decode
-        self._send(200, png, "image/png",
-                   extra={"Cache-Control": "public, max-age=86400"})
+        body, mime = _PNG_CACHE.get_or((str(fp), size, _cache_settings()[1:]),
+                                       lambda: _cached_png(fp, size))  # RAM -> disk -> decode
+        self._send(200, body, mime, extra={"Cache-Control": "public, max-age=86400"})
 
     # -- export (TIF / MP4) -------------------------------------------------
     SMB_PROCESSED = "/Volumes/aulehla/Tiago/AQ-EMBL/PROCESSED"   # SMB fallback for crops
