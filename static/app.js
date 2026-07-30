@@ -1255,13 +1255,18 @@ function renderSettings(body){
   // Frames are cached on local disk so a share is read ONCE. The size that matters is
   // per well: at ~64 KB a frame, one 700-timepoint well is ~45 MB, so a 20 GB cache
   // holds hundreds of wells — the old 4 GB of PNGs held about 32 and thrashed.
-  const scache = sec('Image cache', 'Frames already looked at are kept on this computer, so a network share is read once.');
+  const scache = sec('Image cache',
+    'Frames you have looked at are kept as files on this computer\u2019s DISK (not in memory), '
+    + 'so a network share is only ever read once. Memory use is separate and small.');
   const cinfo = elt('div', 'muted mono', 'checking…');
   scache.appendChild(cinfo);
   const crow = elt('div', 'inline'); crow.style.marginTop = '6px';
   const cap = elt('input'); cap.type = 'number'; cap.min = '1'; cap.style.width = '5em';
-  cap.value = s.cache_gb != null ? s.cache_gb : 20;
-  cap.onchange = () => { s.cache_gb = Math.max(1, Number(cap.value) || 20); push(); };
+  cap.value = s.cache_gb || '';                          // blank = automatic
+  cap.placeholder = 'auto';
+  cap.title = 'Disk space the cache may use. Leave blank for automatic '
+            + '(a tenth of the free space, at most 20 GB).';
+  cap.onchange = () => { s.cache_gb = Number(cap.value) > 0 ? Number(cap.value) : 0; push(); };
   const loss = elt('input'); loss.type = 'checkbox'; loss.checked = !!s.cache_lossless;
   loss.onchange = () => { s.cache_lossless = loss.checked; push(); };
   const ll = elt('label'); ll.appendChild(loss);
@@ -1269,9 +1274,14 @@ function renderSettings(body){
   crow.append(elt('span', 'muted', 'limit'), cap, elt('span', 'muted', 'GB'), ll);
   scache.appendChild(crow);
   jget('/api/cache').then(u => {
-    const gb = (u.bytes || 0) / 1073741824;
-    cinfo.textContent = `${gb.toFixed(1)} GB in ${(u.files || 0).toLocaleString()} frames`
-      + ` · limit ${((u.cap_bytes || 0) / 1073741824).toFixed(0)} GB`;
+    const gb = b => (b || 0) / 1073741824;
+    const ram = u.ram || {};
+    cinfo.textContent =
+      `disk ${gb(u.bytes).toFixed(1)} GB in ${(u.files || 0).toLocaleString()} frames`
+      + ` · limit ${gb(u.cap_bytes).toFixed(1)} GB`
+      + (u.free_bytes != null ? ` · ${gb(u.free_bytes).toFixed(0)} GB free` : '')
+      + `  ·  memory ${Math.round((ram.bytes || 0) / 1048576)} MB`
+      + ` of ${Math.round((ram.cap_bytes || 0) / 1048576)} MB`;
   }).catch(() => { cinfo.textContent = 'unavailable'; });
 
   // ---- version + update ----------------------------------------------------

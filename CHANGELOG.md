@@ -4,6 +4,23 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.4.1] — 2026-07-30
+
+### The cache is DISK, and it no longer assumes your disk is big
+
+"20 GB cache" meant 20 GB of disk in `~/.medaka_annotator/framecache/`, never memory —
+but a flat 20 GB is fine on a workstation and rude on a colleague's laptop, and this app
+is meant to be handed to colleagues. The disk cap now **adapts to the machine**: a tenth
+of the free space, at most 20 GB, and you can still set an explicit number. Settings
+shows what is held, the limit, and how much disk is free.
+
+### Fixed — the in-memory cache was bounded by frame count, not memory
+
+There is a second, small cache in RAM that saves a re-decode. It was capped at *1500
+frames*, which is not a memory budget at all: 1500 frames is ~75 MB of 600 px JPEGs but
+**~600 MB of 1024 px PNGs**. It is now bounded by **bytes** (192 MB), evicting by size,
+and reported separately from the disk cache so the two are never confused again.
+
 ## [1.4.0] — 2026-07-29
 
 ### Fixed — the Windows app would not start at all

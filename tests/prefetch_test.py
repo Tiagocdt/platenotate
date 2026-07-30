@@ -166,12 +166,44 @@ try:
     server._save_settings({"cache_gb": 20, "cache_lossless": False, "cache_quality": 88})
     cap, lossless, q = server._cache_settings()
     check(abs(cap - 20 * 1024 ** 3) < 1 and not lossless and q == 88,
-          "the cache cap / format / quality come from settings")
+          "an explicit cache cap / format / quality come from settings")
+
+    # ---- the caches must be honest about DISK vs MEMORY ------------------------
+    server._save_settings({"cache_gb": 0})                 # 0 = automatic
+    auto = server._cache_settings()[0] / 1024 ** 3
+    import shutil as _sh
+    free_gb = _sh.disk_usage(Path.home()).free / 1024 ** 3
+    check(1.0 <= auto <= 20.0,
+          f"the automatic disk cap is bounded (got {auto:.1f} GB, max 20)")
+    check(auto <= max(1.0, free_gb * 0.1000001),
+          f"…and never more than a tenth of the free space "
+          f"({auto:.1f} GB vs {free_gb:.0f} GB free)")
+
+    # the RAM cache is bounded by BYTES, not by a frame count: 1500 frames is 75 MB of
+    # small JPEGs but ~600 MB of big PNGs, so a count is not a memory budget at all.
+    lru = server._LRU(cap_bytes=100_000)
+    for i in range(50):
+        lru.get_or(i, lambda: (b"x" * 10_000, "image/jpeg"))
+    st = lru.stats()
+    check(st["bytes"] <= 100_000,
+          f"the memory cache holds to its BYTE budget (got {st['bytes']} <= 100000)")
+    check(st["frames"] <= 11,
+          f"…by evicting frames, not by counting them (kept {st['frames']} of 50)")
+    big = server._LRU(cap_bytes=100_000)
+    big.get_or("one", lambda: (b"y" * 500_000, "image/png"))
+    check(big.stats()["frames"] == 1,
+          "a single frame larger than the budget is still served, not dropped")
+    check(server._PNG_CACHE.cap_bytes <= 512 * 1024 ** 2,
+          f"the shipped memory budget is laptop-sized "
+          f"({server._PNG_CACHE.cap_bytes / 1048576:.0f} MB)")
+    u = server.cache_usage()
+    check("ram" in u and "free_bytes" in u,
+          "cache usage separates disk from memory and reports free space")
     server._save_settings({"cache_lossless": True})
     check(server._cache_settings()[1] is True, "lossless (PNG) can be turned back on")
     server._save_settings({"cache_lossless": False})
     u = server.cache_usage()
-    check(set(u) == {"bytes", "files", "cap_bytes"},
+    check({"bytes", "files", "cap_bytes"} <= set(u),
           f"cache usage reports what is held and the cap (got {sorted(u)})")
 
     # ---- the pool is bounded ---------------------------------------------------

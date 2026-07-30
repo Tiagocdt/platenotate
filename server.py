@@ -31,6 +31,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import errno
 import threading
@@ -161,7 +162,7 @@ _SETTINGS_DEFAULTS = {
     "export_dir": "",        # folder for TIF/MP4 exports; "" = next to the plate (legacy)
     "filters": {},           # saved cross-plate filters: {name: {plates, constraints, …}}
     "last_data_root": "",    # the folder last opened — a packaged app reopens it
-    "cache_gb": 20,          # on-disk display-frame cache cap
+    "cache_gb": 0,           # on-disk cache cap in GB; 0 = adapt to free disk space
     "cache_lossless": False, # True = cache PNG instead of JPEG (bigger, exact)
     "cache_quality": 88,     # JPEG quality when not lossless
 }
@@ -368,27 +369,50 @@ except ImportError:                      # pragma: no cover - clearer error
 
 
 class _LRU(OrderedDict):
-    """A tiny thread-safe LRU byte cache for decoded PNGs."""
-    def __init__(self, cap=1200):
+    """A thread-safe in-RAM LRU of decoded frames, bounded by BYTES.
+
+    It used to be bounded by COUNT (1500 frames), which says nothing about memory: 1500
+    frames is ~75 MB of 600 px JPEGs but ~600 MB of 1024 px PNGs. A cache whose size
+    depends on which view you happened to open is not a budget. Bytes it is.
+    """
+    def __init__(self, cap_bytes=192 * 1024 ** 2):
         super().__init__()
-        self.cap = cap
+        self.cap_bytes = cap_bytes
+        self.nbytes = 0
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _size(val):
+        if isinstance(val, tuple):        # (bytes, mime)
+            return len(val[0]) if val and isinstance(val[0], (bytes, bytearray)) else 0
+        return len(val) if isinstance(val, (bytes, bytearray)) else 0
 
     def get_or(self, key, make):
         with self.lock:
             if key in self:
                 self.move_to_end(key)
                 return self[key]
-        val = make()                     # decode outside the lock
+        val = make()                      # decode outside the lock
+        n = self._size(val)
         with self.lock:
+            if key in self:               # another thread won the race
+                self.nbytes -= self._size(self[key])
             self[key] = val
+            self.nbytes += n
             self.move_to_end(key)
-            while len(self) > self.cap:
-                self.popitem(last=False)
+            while self.nbytes > self.cap_bytes and len(self) > 1:
+                _k, v = self.popitem(last=False)
+                self.nbytes -= self._size(v)
         return val
 
+    def stats(self):
+        with self.lock:
+            return {"bytes": self.nbytes, "frames": len(self), "cap_bytes": self.cap_bytes}
 
-_PNG_CACHE = _LRU(cap=1500)
+
+# ~192 MB: a few hundred frames of the current view, sized so the app stays comfortable
+# on a laptop. The BIG cache is on disk; this one only saves a re-decode.
+_PNG_CACHE = _LRU(cap_bytes=192 * 1024 ** 2)
 
 # ---------------------------------------------------------------- 16-bit display
 # A 16-bit crop holds physical camera counts (the pipeline's --fl-scale raw16),
@@ -503,12 +527,24 @@ _CACHE_DEFAULT_QUALITY = 88
 _cache_writes = [0]
 
 
+def _default_cache_gb() -> float:
+    """A disk budget the machine can actually spare: at most `_CACHE_DEFAULT_GB`, and
+    never more than a tenth of the free space. A flat 20 GB is fine on a workstation and
+    rude on a colleague's laptop — and this app is meant to be handed to colleagues."""
+    try:
+        free = shutil.disk_usage(Path.home()).free / 1024 ** 3
+    except Exception:                                      # noqa: BLE001
+        return 4.0
+    return max(1.0, min(float(_CACHE_DEFAULT_GB), free * 0.10))
+
+
 def _cache_settings():
     s = _load_settings()
+    raw = s.get("cache_gb")
     try:
-        cap = float(s.get("cache_gb") or _CACHE_DEFAULT_GB)
+        cap = float(raw) if raw not in (None, "", 0) else _default_cache_gb()
     except (TypeError, ValueError):
-        cap = _CACHE_DEFAULT_GB
+        cap = _default_cache_gb()
     lossless = bool(s.get("cache_lossless"))
     try:
         q = int(s.get("cache_quality") or _CACHE_DEFAULT_QUALITY)
@@ -533,7 +569,12 @@ def cache_usage() -> dict:
             except OSError:
                 pass
     cap, _lossless, _q = _cache_settings()
-    return {"bytes": total, "files": files, "cap_bytes": int(cap)}
+    try:
+        free = shutil.disk_usage(_frame_cache_dir().parent).free
+    except Exception:                                      # noqa: BLE001
+        free = None
+    return {"bytes": total, "files": files, "cap_bytes": int(cap), "free_bytes": free,
+            "ram": _PNG_CACHE.stats()}          # the in-memory cache is separate + small
 
 
 def _cached_png(path: Path, size: int):
