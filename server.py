@@ -46,16 +46,71 @@ import model
 import db_store
 import version
 
+class _NullStream:
+    """Somewhere for output to go when there is nowhere for output to go.
+
+    A windowed build has no console, and PyInstaller leaves ``sys.stdout``/``sys.stderr``
+    as **None**. CPython's ``print`` quietly tolerates that; ``sys.stderr.write(...)`` does
+    not — it is an ``AttributeError``. That asymmetry cost a release. The HTTP request
+    logger writes to stderr directly, and ``send_response`` logs BEFORE it sends a single
+    byte, so *every request in the app* died with the client seeing nothing but a closed
+    connection (``RemoteDisconnected``) and no traceback anywhere, because the traceback
+    also goes to the stderr that is not there.
+
+    Standing in for the missing stream fixes the whole class of it: nothing that writes a
+    message can raise, wherever in the codebase it lives and whoever writes it next.
+    """
+    encoding = "utf-8"
+    errors = "replace"
+    closed = False
+
+    def write(self, text):
+        return len(text) if isinstance(text, str) else 0
+
+    def writelines(self, lines):
+        for _ in lines:
+            pass
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def readable(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def seekable(self):
+        return False
+
+    def fileno(self):
+        raise io.UnsupportedOperation("this build has no console")
+
+
 def make_console_safe():
     """Never let a console message crash the app.
 
-    Windows consoles default to cp1252, which cannot encode the arrows, ellipses, µ and
-    warning signs this codebase prints — and an unencodable character raises
-    UnicodeEncodeError from inside `print`, which in a windowed build surfaces as
-    "Failed to execute script 'desktop'" and no app at all. A launch banner is not worth
-    a crash: switch the streams to UTF-8, and if even that is refused, keep the console's
-    own encoding but replace anything it cannot render.
+    Two ways a message has managed to kill this app, both fixed here:
+
+    * Windows consoles default to cp1252, which cannot encode the arrows, ellipses, µ and
+      warning signs this codebase prints — and an unencodable character raises
+      UnicodeEncodeError from inside `print`, which in a windowed build surfaces as
+      "Failed to execute script 'desktop'" and no app at all. A launch banner is not worth
+      a crash: switch the streams to UTF-8, and if even that is refused, keep the console's
+      own encoding but replace anything it cannot render.
+    * A windowed build has **no streams at all**. Give the app somewhere to write instead
+      of leaving None in place for the next `.write` to trip over (see _NullStream).
     """
+    if sys.stdout is None:
+        sys.stdout = _NullStream()
+    if sys.stderr is None:
+        sys.stderr = _NullStream()
     for stream in (sys.stdout, sys.stderr):
         if stream is None:
             continue
@@ -1026,8 +1081,19 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "PlateNotate/" + version.version()
 
     def log_message(self, fmt, *args):            # quieter console
-        if "/api/frame" not in self.path:
-            sys.stderr.write("  %s\n" % (fmt % args))
+        """A log line must never be able to fail a request.
+
+        `send_response` calls this BEFORE writing a single byte, so anything raised here
+        closes the connection with no response at all — the browser gets
+        `RemoteDisconnected` and every page of the app fails at once, with the traceback
+        going to the same missing stream that caused it. `self.path` also does not exist
+        yet when the request line itself was malformed.
+        """
+        try:
+            if "/api/frame" not in self.path:
+                sys.stderr.write("  %s\n" % (fmt % args))
+        except Exception:                         # noqa: BLE001
+            pass
 
     # -- helpers ------------------------------------------------------------
     def _send(self, code, body, ctype="application/json", extra=None):

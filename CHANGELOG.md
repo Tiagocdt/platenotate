@@ -4,6 +4,34 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.5.2] — 2026-08-06
+
+### Fixed — with no console, the Windows app served nothing at all
+
+Caught by the v1.5.1 build itself, on Windows:
+
+```
+FAIL /: RemoteDisconnected: Remote end closed connection without response
+FAIL /static/app.js: RemoteDisconnected …          (all six, instantly)
+```
+
+A windowed build has **no console**: PyInstaller leaves `sys.stdout` and `sys.stderr` as
+`None`. `print` quietly tolerates that — `sys.stderr.write(...)` does not, it is an
+`AttributeError`. The HTTP request logger wrote to stderr directly, and `send_response`
+**logs before it sends a single byte**, so every request in the app died before answering
+and the browser saw only a closed connection. The traceback went to the same missing
+stream that caused it, so there was nothing to read either.
+
+- `make_console_safe()` now **stands in for a missing stream** instead of leaving `None`
+  for the next `.write` to trip over. That closes the whole class of it, wherever the next
+  message gets written.
+- The request logger cannot raise regardless — it also runs before `self.path` exists when
+  a request line is malformed.
+- **`console_test.py` now makes a real request over a real socket with both streams set to
+  `None`** and requires a 200. Every other check in that file passes with stderr missing,
+  which is exactly how this reached a release: the same lesson as the cp1252 banner, one
+  layer further in, and the tests only knew about the layer above.
+
 ## [1.5.1] — 2026-08-06
 
 ### Windows without the WebView2 runtime gets the browser, not Internet Explorer

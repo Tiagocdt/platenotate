@@ -117,5 +117,42 @@ dialog_text = re.findall(r"_message_box\((.*?)\n\s*(?:\)|\"|')", desktop_src, re
 check(all(t.isascii() for t in dialog_text),
       f"the error dialogs are ASCII ({len(dialog_text)} found)")
 
+# ---- a build with NO streams must still serve every request ------------------
+# This is the v1.5.1 Windows failure, reduced. A windowed build leaves sys.stdout and
+# sys.stderr as None; the request logger wrote to stderr directly; and send_response
+# LOGS BEFORE IT SENDS A BYTE — so every request died with the client seeing only a
+# closed connection, and the traceback went to the stderr that was not there. The whole
+# app was unreachable and the report was empty. Only a real request over a real socket
+# catches this: the checks above all pass with stderr None.
+import tempfile                                            # noqa: E402
+import threading                                           # noqa: E402
+import urllib.request                                      # noqa: E402
+from pathlib import Path                                   # noqa: E402
+
+server.Handler.data_root = Path(tempfile.mkdtemp(prefix="platenotate-console-test-"))
+server._open_process_db(server.Handler.data_root)
+httpd, port = server._serve("127.0.0.1", 0)
+threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+results = {}
+sys.stdout, sys.stderr = None, None                        # exactly a windowed build
+try:
+    server.make_console_safe()
+    for path in ("/", "/api/version", "/api/config", "/static/app.js"):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+                results[path] = r.status
+        except Exception as e:                             # noqa: BLE001
+            results[path] = f"{type(e).__name__}: {e}"
+finally:
+    sys.stdout, sys.stderr = real_out, real_err
+    httpd.shutdown()
+
+for path, got in results.items():
+    check(got == 200, f"with no console at all, GET {path} still answers 200 (got {got})")
+
+# and a malformed request line, where self.path does not exist yet, must not kill it
+check(callable(server.Handler.log_message), "the request logger is still installed")
+
 print(f"\nconsole_test: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
