@@ -107,6 +107,59 @@ jobs:
           }
           Write-Host "launch path OK"
 
+      # ---- the GUI TOOLKIT itself ----
+      # The launch test above stops one call short of webview.start(), so the toolkit
+      # behind the window was never loaded by anything in CI — and loading it is exactly
+      # what failed on a collaborator's Windows machine (pywebview -> pythonnet ->
+      # Python.Runtime.dll -> .NET said no). A headless runner cannot check that a window
+      # RENDERS; it can absolutely check that the toolkit will load, which is the failure
+      # that shipped.
+      - name: GUI backend probe (Windows, marked as downloaded)
+        if: runner.os == 'Windows'
+        timeout-minutes: 6
+        # Reproduce the collaborator's machine first. A .zip fetched with a browser and
+        # extracted by Explorer leaves EVERY extracted file carrying a Zone.Identifier
+        # stream, and the .NET Framework refuses to load an assembly that has one. A
+        # runner that builds its own files locally never sees that mark, which is why a
+        # green build shipped an app that could not open its window.
+        run: |
+          $marked = 0
+          Get-ChildItem -Path dist\PlateNotate -Recurse -File -Include *.dll,*.pyd,*.exe |
+            ForEach-Object {
+              Set-Content -Path $_.FullName -Stream Zone.Identifier `
+                          -Value "[ZoneTransfer]`r`nZoneId=3"
+              $marked++
+            }
+          Write-Host "marked $marked files as downloaded-from-the-internet"
+          if ($marked -eq 0) { Write-Host "::error::marked nothing - the test is not testing anything"; exit 1 }
+          $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe `
+                             -ArgumentList '--gui-probe' -PassThru
+          if (-not $p.WaitForExit(300000)) {
+            Write-Host "::error::the GUI probe did not finish within 300s"
+            try { $p.Kill() } catch {}
+            exit 1
+          }
+          if (Test-Path platenotate-guiprobe.log) { Get-Content platenotate-guiprobe.log }
+          if ($p.ExitCode -ne 0) {
+            Write-Host "::error::the Windows GUI backend will not load (see above)"
+            exit 1
+          }
+      - name: GUI backend probe (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 6
+        shell: bash
+        run: dist/PlateNotate.app/Contents/MacOS/PlateNotate --gui-probe
+      - name: GUI backend probe (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 6
+        shell: bash
+        # Reported, not required. The GTK bindings pywebview needs on Linux come from the
+        # runner's SYSTEM python (apt installs python3-gi), not from the build venv, so a
+        # failure here measures the runner as much as the bundle — and since v1.5.0 the
+        # app opens in the browser rather than dying when the toolkit is missing.
+        continue-on-error: true
+        run: dist/PlateNotate/PlateNotate --gui-probe
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: cd dist && zip -qry PlateNotate-macOS.zip PlateNotate.app
@@ -168,6 +221,13 @@ jobs:
             app just refuses, with no way through from that dialog. If it is still
             blocked, run once:
             `xattr -dr com.apple.quarantine /Applications/PlateNotate.app`
+
+            **Windows:** the app now clears the "downloaded from the internet" mark from
+            its own files on startup — that mark is what stopped earlier versions from
+            opening their window. If it ever still misbehaves right after a download,
+            right-click **the .zip** → Properties → **Unblock** → OK, then extract again.
+            And if the window cannot be opened at all, PlateNotate opens in your default
+            browser instead of failing.
 
             Everything stays on your machine: PlateNotate is a local app over your own
             image folders — no account, no upload, no network access.

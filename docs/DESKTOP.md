@@ -64,6 +64,31 @@ workflow.
 Windows → "More info → Run anyway". For frictionless distribution, sign + notarize
 (macOS Developer ID / Windows code-signing cert) — a later step.
 
+### The three checks CI runs against the frozen bundle
+
+| mode | what it proves | why it exists |
+|---|---|---|
+| `PlateNotate --selftest` | the server boots, serves every page, and every lazy import resolves | a bundle that compiles but dies on launch is worse than no bundle |
+| `PLATENOTATE_NO_GUI=1 PlateNotate` | the real launch path — banner, database, server — runs | `--selftest` exits before any of it; a cp1252 arrow in the banner once shipped a dead app |
+| `PlateNotate --gui-probe` | the **GUI toolkit behind the window loads** | nothing in CI had ever loaded it, and it is what broke on Windows in 1.4.x |
+
+The Windows probe runs on a bundle CI has deliberately stamped with `Zone.Identifier` on
+every `.dll`/`.pyd`/`.exe` first. That is what a browser download plus Explorer's "Extract
+All" leaves behind, and .NET refuses to load an assembly carrying it — a runner building
+its own files locally never sees the mark, which is exactly how a green build shipped an
+app that could not open its window. See `desktop.py:unblock_bundle`.
+
+A headless runner cannot check that a window *renders*. Everything short of that is
+checked here.
+
+### When the window cannot be opened
+
+`desktop.py` never lets that be fatal: it opens the app in the default browser and keeps
+serving, with a dialog that explains and quits when closed. `PLATENOTATE_BROWSER=1`
+forces that path for testing. Unhandled exceptions go to
+`~/.medaka_annotator/platenotate-crash.log` and into a readable dialog rather than
+PyInstaller's crash box.
+
 ## Data
 
 The app bundles **no data**. Collaborators point it at their own folder of processed

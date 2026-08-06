@@ -15,3 +15,6 @@ dist_notate/
 *.bak
 *.bak_*
 screening_*.json
+
+# logs the app writes about itself (selftest, GUI probe, crashes)
+platenotate-*.log

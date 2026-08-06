@@ -23,6 +23,25 @@ ic_datas, ic_bins, ic_hidden = collect_all("imagecodecs")
 # imageio-ffmpeg carries the ffmpeg binary as package data (so no system ffmpeg needed).
 ff_datas = collect_data_files("imageio_ffmpeg", include_py_files=False)
 
+# The Windows window is a .NET window: pywebview -> pythonnet -> Python.Runtime.dll, plus
+# clr_loader's native ClrLoader.dll shim that hosts the CLR. Both are pulled in by
+# PyInstaller's own hooks today; collect them explicitly anyway, because when one of them
+# is missing the app does not degrade — it dies before drawing a pixel, and the traceback
+# blames a file path rather than a missing dependency.
+clr_datas, clr_bins, clr_hidden = ([], [], [])
+if sys.platform == "win32":
+    for pkg in ("pythonnet", "clr_loader"):
+        d, b, h = collect_all(pkg)
+        clr_datas += d
+        clr_bins += b
+        clr_hidden += h
+
+# The GUI backend is imported by pywebview at RUNTIME, from a name it builds itself, so
+# Analysis cannot see it — and desktop.py's --gui-probe imports it by name too.
+GUI_BACKEND = {"win32": "webview.platforms.winforms",
+               "darwin": "webview.platforms.cocoa"}.get(sys.platform,
+                                                        "webview.platforms.gtk")
+
 datas = [
     (str(ROOT / "static"), "static"),
     (str(ROOT / "index.html"), "."),
@@ -31,19 +50,21 @@ datas = [
     (str(ROOT / "annotation_schema.json"), "."),
     (str(ROOT / "VERSION"), "."),
     (str(ASSETS / "logo.png"), "assets"),
-] + ic_datas + ff_datas
+] + ic_datas + ff_datas + clr_datas
 
 # app + sibling modules that are imported lazily / via sys.path (so Analysis may miss them)
 hiddenimports = [
     "server", "model", "db_store", "export", "version",
     "well_hyperstack", "focus_cut", "compose", "annotations", "build_db",
     "numpy", "tifffile", "imagecodecs", "PIL.Image", "imageio_ffmpeg", "webview",
-] + ic_hidden
+    "webbrowser",                          # the fallback front end when no window opens
+    GUI_BACKEND,
+] + ic_hidden + clr_hidden
 
 a = Analysis(
     [str(ROOT / "desktop.py")],
     pathex=[str(ROOT), str(DEPS), str(ENGINE), str(METADB)],
-    binaries=ic_bins,
+    binaries=ic_bins + clr_bins,
     datas=datas,
     hiddenimports=hiddenimports,
     excludes=["torch", "torchvision", "matplotlib", "scipy", "pandas", "tkinter"],

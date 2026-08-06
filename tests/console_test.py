@@ -96,17 +96,26 @@ finally:
 check(survived, "no stdout at all (a windowed build) is handled")
 
 # ---- the banner is ASCII, so it cannot fail before the fix even applies ------
+# desktop.py emits through _say() (a print that cannot raise) as well as print(), so
+# check both — a banner that moved behind a helper must not slip out of this net.
+SAYS = r"\b(?:print|_say)\("
 desktop_src = (HERE.parent / "desktop.py").read_text(encoding="utf-8")
 banner_lines = [ln for ln in desktop_src.splitlines()
-                if "print(" in ln and "PlateNotate v" in ln]
+                if re.search(SAYS, ln) and "PlateNotate v" in ln]
 check(bool(banner_lines), "the launch banner line was found")
 check(all(ln.isascii() for ln in banner_lines),
       f"the launch banner is pure ASCII ({len(banner_lines)} line(s))")
 
-# every print() in the startup path of desktop.py stays ASCII
+# every line that emits text in desktop.py stays ASCII
 non_ascii = [ln.strip() for ln in desktop_src.splitlines()
-             if re.search(r"\bprint\(", ln) and not ln.isascii()]
-check(not non_ascii, f"no print() in desktop.py carries non-ASCII text ({non_ascii[:1]})")
+             if re.search(SAYS, ln) and not ln.isascii()]
+check(not non_ascii, f"nothing desktop.py prints carries non-ASCII text ({non_ascii[:1]})")
+
+# the message boxes go through user32's wide-character API, but the app also writes
+# them to a log and to stderr, so keep them printable on a cp1252 console too.
+dialog_text = re.findall(r"_message_box\((.*?)\n\s*(?:\)|\"|')", desktop_src, re.S)
+check(all(t.isascii() for t in dialog_text),
+      f"the error dialogs are ASCII ({len(dialog_text)} found)")
 
 print(f"\nconsole_test: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

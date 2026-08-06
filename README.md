@@ -45,6 +45,14 @@ blocks it, run once:
 xattr -dr com.apple.quarantine /Applications/PlateNotate.app
 ```
 
+On Windows, the app clears the "downloaded from the internet" mark from its own files
+when it starts, which is what used to stop it opening its window. If it ever still
+misbehaves straight after a download, right-click **the .zip** → Properties →
+**Unblock** → OK, then extract it again.
+
+If PlateNotate cannot open its own window on your computer, it opens in your default
+browser instead and tells you so — the app is the same either way.
+
 On first run, click **📂 Open** and point it at the folder holding your plate folders.
 It reopens there next time.
 

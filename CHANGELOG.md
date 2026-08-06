@@ -4,6 +4,68 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.5.0] — 2026-08-06
+
+### Fixed — the Windows app still would not start
+
+```
+Failed to execute script 'desktop' due to unhandled exception:
+RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize from
+C:\Users\…\Downloads\PlateNotate-Windows\_internal\pythonnet\runtime\Python.Runtime.dll
+```
+
+**Windows had marked our own files as untrusted, and .NET obeyed.** Every file
+extracted from a downloaded `.zip` carries a hidden `Zone.Identifier` stream — the "Mark
+of the Web" — and the .NET Framework flatly refuses to load an assembly that has one.
+PlateNotate's window is a .NET window (pywebview → pythonnet → `Python.Runtime.dll`), so
+the app died before drawing a pixel. Unzipping into `Downloads` was enough to cause it;
+right-click → Properties → **Unblock** on the zip *before* extracting would have avoided
+it, which nobody knows and nobody should have to.
+
+- **The app now unblocks itself**: on launch it deletes that mark from its own files, in
+  its own folder, and nowhere else. That is the same operation as the Unblock checkbox.
+- If the files cannot be rewritten (read-only media, a network share, a policy that
+  re-marks them), it retries .NET in a private AppDomain that is allowed to load
+  "remote" assemblies, and then falls through to .NET Core.
+- **pywebview's own fallback for this could never work**, which is why the traceback
+  showed the same error twice. It sets `PYTHONNET_RUNTIME=coreclr` and re-imports `clr`,
+  but `pythonnet.load()` short-circuits on the runtime object it already cached, so the
+  retry re-raises the *first* runtime's error and the environment variable is never
+  read. Each retry here installs a new runtime instead of re-asking the old one.
+
+### The app no longer depends on being able to open a window
+
+If the native window cannot be opened for **any** reason, PlateNotate now opens in your
+default browser and keeps running, with a dialog that says so and quits when you close
+it. It is a local web app; a browser is a perfectly good frame for it, and a running app
+beats a crash dialog. This also gives Linux a working app on machines where the GTK
+bindings are missing from the bundle. (In browser mode the **Browse…** button is not
+available — type or paste the folder path in **📂 Open** instead.)
+
+`PLATENOTATE_BROWSER=1` forces this mode.
+
+### Errors you can act on, instead of "Failed to execute script"
+
+Anything the app cannot recover from is now written to
+`~/.medaka_annotator/platenotate-crash.log` and shown in a real dialog with the error in
+it. PyInstaller's own crash box shows a traceback nobody can copy, and on a machine with
+no console — which is every packaged build — it was the *entire* user-facing error
+message for three releases.
+
+### CI now loads the GUI toolkit, on a bundle marked as downloaded
+
+`--selftest` exits before the window exists and the launch test stops one call short of
+it, so **nothing in CI had ever loaded the toolkit behind the window** — the thing that
+broke, twice. There is now a `--gui-probe` mode that imports the platform backend
+without opening a window, and on Windows CI stamps `Zone.Identifier` onto every `.dll`,
+`.pyd` and `.exe` in the frozen bundle first, reproducing a downloaded-and-unzipped copy
+before running it. A headless runner cannot check that a window *renders*; it can check
+that the toolkit will load, which is the failure that actually shipped.
+
+The window stack (`pywebview`, `pythonnet`, `clr-loader`) is **pinned** now. Every
+Windows failure this project has had came from there, and an unpinned build cannot be
+reproduced after the fact.
+
 ## [1.4.1] — 2026-07-30
 
 ### The cache is DISK, and it no longer assumes your disk is big

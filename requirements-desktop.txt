@@ -5,7 +5,16 @@ numpy>=1.24
 tifffile>=2024.1
 imagecodecs>=2024.1        # pure-C TIF decode — the export speed-up depends on it
 pillow>=10.0               # /api/frame PNG resize
-pywebview>=5.0             # native window
 imageio-ffmpeg>=0.5        # bundled ffmpeg binary → MP4 export with no system ffmpeg
+
+# The window stack is PINNED, unlike everything above it. Every Windows failure this
+# project has had came from here, and an unpinned build cannot be reproduced after the
+# fact: when a collaborator reports a crash, "which pywebview did that .exe contain?"
+# has to have an answer. desktop.py is written against these exact versions (pywebview
+# 6.2.1's winforms backend, and the pythonnet load path it drives). Bump them
+# deliberately, then check the Windows GUI probe in CI is still green.
+pywebview==6.2.1           # native window
+pythonnet==3.1.0 ; sys_platform == "win32"     # pywebview's winforms backend needs it
+clr-loader==0.3.1 ; sys_platform == "win32"    # …and this hands Python.Runtime.dll to .NET
 # macOS: pip pulls pyobjc-framework-WebKit automatically.
-# Windows: uses the Edge WebView2 runtime (present on Win10/11); pip pulls pythonnet.
+# Windows: uses the Edge WebView2 runtime (present on Win10/11).
