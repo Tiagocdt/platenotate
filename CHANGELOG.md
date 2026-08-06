@@ -4,6 +4,21 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.5.1] — 2026-08-06
+
+### Windows without the WebView2 runtime gets the browser, not Internet Explorer
+
+When the Edge WebView2 runtime is missing, pywebview does not fail — it quietly settles
+for **MSHTML, the Internet Explorer 11 engine**, and opens the window anyway. PlateNotate's
+interface is modern JavaScript, so that window would come up on a broken page: a worse
+outcome than not opening at all, and a far more confusing one to report. The engine is now
+checked before the window is created, and MSHTML sends the app to your default browser
+instead, with the reason on screen.
+
+The Windows CI probe also verifies its own premise now: it reads the `Zone.Identifier`
+stream back after writing it, so a silently-ignored mark cannot let the probe look like it
+survived a condition it never met.
+
 ## [1.5.0] — 2026-08-06
 
 ### Fixed — the Windows app still would not start

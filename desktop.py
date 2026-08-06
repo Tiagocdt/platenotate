@@ -231,6 +231,26 @@ def _say(msg: str) -> None:
 
 
 # ────────────────────────────────────────────────────────────────── the two front ends
+def _gui_backend() -> tuple[object | None, str | None, str | None]:
+    """Import the GUI backend for this platform and say which engine it settled on.
+
+    Returns (module, renderer, error). pywebview does this import itself a moment later
+    and will find it cached, so the only thing forced early is knowing the answer — which
+    is what lets us choose the browser BEFORE a useless window appears.
+
+    Windows only. Linux has two candidate backends and pywebview's own ordering between
+    them is worth keeping; macOS has never needed the help.
+    """
+    if not WINDOWS:
+        return None, None, None
+    try:
+        import webview.platforms.winforms as backend
+    except Exception as exc:                    # noqa: BLE001
+        return None, None, (f"the Windows window backend would not load "
+                            f"({type(exc).__name__}: {exc})")
+    return backend, getattr(backend, "renderer", None), None
+
+
 def _start_native_window(url: str) -> str | None:
     """Open the app in its own window and block until it closes.
 
@@ -251,6 +271,16 @@ def _start_native_window(url: str) -> str | None:
         import webview
     except Exception as exc:                    # noqa: BLE001
         return f"pywebview is not available ({type(exc).__name__}: {exc})"
+
+    _backend, renderer, err = _gui_backend()
+    if err:
+        return err
+    if renderer == "mshtml":
+        # pywebview picks the engine at import time and silently settles for MSHTML —
+        # Internet Explorer 11 — when the Edge WebView2 runtime is missing. This UI is
+        # modern JavaScript, so that window would open onto a broken page: a worse
+        # outcome than not opening it, and a much more confusing one to report.
+        return "this computer has no Edge WebView2 runtime, and Internet Explorer cannot render PlateNotate"
 
     bridge = Bridge()
     try:
@@ -313,15 +343,20 @@ def probe_gui() -> tuple[bool, str]:
     err = _load_dotnet()
     if err:
         return False, err
-    backend = {"win32": "webview.platforms.winforms",
-               "darwin": "webview.platforms.cocoa"}.get(sys.platform,
-                                                        "webview.platforms.gtk")
+    name = {"win32": "webview.platforms.winforms",
+            "darwin": "webview.platforms.cocoa"}.get(sys.platform,
+                                                     "webview.platforms.gtk")
     try:
         import importlib
-        importlib.import_module(backend)
+        backend = importlib.import_module(name)
     except Exception:                           # noqa: BLE001
-        return False, f"{backend} would not import:\n" + traceback.format_exc()
-    return True, f"{backend} imported (unblocked {cleared} files)"
+        return False, f"{name} would not import:\n" + traceback.format_exc()
+    # Reported, not required: which engine the backend settled on depends on what is
+    # installed on THIS machine, and a runner without the WebView2 runtime would fail a
+    # build over a condition the app now handles by opening the browser instead.
+    engine = getattr(backend, "renderer", None)
+    return True, (f"{name} imported (unblocked {cleared} files"
+                  + (f", engine={engine}" if engine else "") + ")")
 
 
 # ──────────────────────────────────────────────────────────────────────────────── main

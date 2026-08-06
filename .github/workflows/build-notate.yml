@@ -123,15 +123,23 @@ jobs:
         # runner that builds its own files locally never sees that mark, which is why a
         # green build shipped an app that could not open its window.
         run: |
-          $marked = 0
-          Get-ChildItem -Path dist\PlateNotate -Recurse -File -Include *.dll,*.pyd,*.exe |
-            ForEach-Object {
-              Set-Content -Path $_.FullName -Stream Zone.Identifier `
-                          -Value "[ZoneTransfer]`r`nZoneId=3"
-              $marked++
-            }
-          Write-Host "marked $marked files as downloaded-from-the-internet"
-          if ($marked -eq 0) { Write-Host "::error::marked nothing - the test is not testing anything"; exit 1 }
+          $files = @(Get-ChildItem -Path dist\PlateNotate -Recurse -File |
+                     Where-Object { $_.Extension -in '.dll', '.pyd', '.exe' })
+          foreach ($f in $files) {
+            Set-Content -Path $f.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          Write-Host "marked $($files.Count) files as downloaded-from-the-internet"
+          if ($files.Count -eq 0) {
+            Write-Host "::error::marked nothing - this test would not be testing anything"
+            exit 1
+          }
+          # Prove the mark took, so a silently-ignored Set-Content cannot make the probe
+          # look like it survived a condition it never met.
+          $probe = Get-Content -Path $files[0].FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue
+          if (-not $probe) {
+            Write-Host "::error::the Zone.Identifier stream did not stick on $($files[0].Name)"
+            exit 1
+          }
           $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe `
                              -ArgumentList '--gui-probe' -PassThru
           if (-not $p.WaitForExit(300000)) {

@@ -243,6 +243,21 @@ finally:
 check(isinstance(reason, str) and "no display" in reason,
       "a window that will not open returns the toolkit's own words")
 
+saved_backend = desktop._gui_backend
+desktop._gui_backend = lambda: (object(), "mshtml", None)
+saved_wv = sys.modules.get("webview")
+sys.modules["webview"] = BoomWebview()          # create_window must never be reached
+try:
+    reason = desktop._start_native_window("http://127.0.0.1:1/")
+finally:
+    desktop._gui_backend = saved_backend
+    if saved_wv is None:
+        sys.modules.pop("webview", None)
+    else:
+        sys.modules["webview"] = saved_wv
+check(isinstance(reason, str) and "WebView2" in reason,
+      "no WebView2 runtime -> the browser, not a window running Internet Explorer")
+
 os.environ["PLATENOTATE_BROWSER"] = "1"
 try:
     check(desktop._start_native_window("http://x/") == "PLATENOTATE_BROWSER is set",
