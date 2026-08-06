@@ -183,6 +183,15 @@ python tests/db_roundtrip_test.py
   publishing**). Replace it with your own staging series.
 - Suggestions accumulate in `annotation_schema.json` as you work.
 
+## Related
+
+[**embryo_crop**](https://github.com/Tiagocdt/embryo_crop) — produces the crops
+PlateNotate annotates. It detects each embryo in a raw ACQUIFER plate, cuts a
+fixed physical field of view around it, applies one deliberate intensity map,
+and writes the per-channel / per-well / per-z-slice layout described in
+[What your data should look like](#what-your-data-should-look-like), including
+the `plate_metadata.json` that makes a plate discoverable here.
+
 ## Licence
 
 MIT — see [`LICENSE`](LICENSE).
