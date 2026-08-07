@@ -133,13 +133,26 @@ jobs:
             Write-Host "::error::marked nothing - this test would not be testing anything"
             exit 1
           }
-          # Prove the mark took, so a silently-ignored Set-Content cannot make the probe
-          # look like it survived a condition it never met.
-          $probe = Get-Content -Path $files[0].FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue
-          if (-not $probe) {
-            Write-Host "::error::the Zone.Identifier stream did not stick on $($files[0].Name)"
+          # Windows will not LAUNCH a marked .exe at all: ShellExecute refuses it with
+          # "The operation was canceled by the user" — that is SmartScreen's "Windows
+          # protected your PC", with nobody here to click "Run anyway". A real person
+          # clicks through that dialog once, and the app then runs with its _internal
+          # DLLs still marked. THAT is the state which broke it, so reproduce that state:
+          # unblock the launcher only, and leave everything the app loads still marked.
+          Unblock-File -Path dist\PlateNotate\PlateNotate.exe
+          # Prove the mark is still on what actually matters, so a silently-ignored
+          # Set-Content cannot make the probe look like it survived an untested condition.
+          $dll = Get-ChildItem -Path dist\PlateNotate -Recurse -File -Filter Python.Runtime.dll |
+                 Select-Object -First 1
+          if (-not $dll) {
+            Write-Host "::error::Python.Runtime.dll is not in the bundle - the Windows window cannot work"
             exit 1
           }
+          if (-not (Get-Content -Path $dll.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::Python.Runtime.dll is not marked - this test would prove nothing"
+            exit 1
+          }
+          Write-Host "still marked, as on a collaborator's machine: $($dll.FullName)"
           $p = Start-Process -FilePath dist\PlateNotate\PlateNotate.exe `
                              -ArgumentList '--gui-probe' -PassThru
           if (-not $p.WaitForExit(300000)) {

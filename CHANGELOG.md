@@ -4,6 +4,33 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.5.3] — 2026-08-07
+
+### The Windows test could not start the app it was testing
+
+The v1.5.2 Windows build got through the build, the selftest and the launch test — so the
+1.5.2 fix works — and then the new GUI probe failed before running anything:
+
+```
+An error occurred trying to start process '…\PlateNotate.exe'.
+The operation was canceled by the user.
+```
+
+Nobody cancelled anything. **Windows refuses to launch a marked `.exe` at all** — that
+message is SmartScreen's "Windows protected your PC", with no one on a headless runner to
+click "Run anyway". The test had marked *every* file including the launcher, which is
+faithful to what Explorer does but not to the state the app actually runs in: a real person
+clicks through that dialog once, and the app then starts **with its `_internal` DLLs still
+marked**. That is the state that broke it.
+
+The probe now unblocks the launcher only, and asserts that `Python.Runtime.dll` is *still*
+marked before running — so it fails loudly rather than quietly testing nothing.
+
+Nothing in the app changed. Worth knowing as a user, though: the first launch of any
+unsigned download shows SmartScreen and needs **More info → Run anyway** — and because
+PlateNotate clears the mark from its own launcher on that first run, you should not see it
+again.
+
 ## [1.5.2] — 2026-08-06
 
 ### Fixed — with no console, the Windows app served nothing at all
