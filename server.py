@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import errno
 import threading
 import argparse
@@ -260,6 +261,7 @@ def _save_settings(patch: dict) -> dict:
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(s, indent=2))
     tmp.replace(p)
+    _cache_settings_memo["val"] = None      # a new cache limit must take effect NOW
     return s
 
 
@@ -442,6 +444,16 @@ class _LRU(OrderedDict):
             return len(val[0]) if val and isinstance(val[0], (bytes, bytearray)) else 0
         return len(val) if isinstance(val, (bytes, bytearray)) else 0
 
+    def peek(self, key):
+        """The value if it is already decoded, else None — and never a read of any kind.
+        Lets a caller answer from memory WITHOUT entering the guarded store path, so a
+        stalled share cannot slow down frames the app is already holding."""
+        with self.lock:
+            if key in self:
+                self.move_to_end(key)
+                return self[key]
+        return None
+
     def get_or(self, key, make):
         with self.lock:
             if key in self:
@@ -577,23 +589,66 @@ def _to_png(path: Path, size: int) -> bytes:
 # re-read the whole trajectory from the share. JPEG at q88 is ~64 KB for the same frame
 # (2.9x more frames in the same space) and this is a DISPLAY cache — measurements are
 # taken in image coordinates, which JPEG does not touch. Lossless is one setting away.
-_CACHE_DEFAULT_GB = 20
+_CACHE_DEFAULT_GB = 20          # the most it will ever take, however big the disk
+_CACHE_TOTAL_FRACTION = 0.02    # …or this share of the WHOLE disk, whichever is smaller
+_CACHE_MIN_GB = 4               # under this it cannot hold a plate; it only thrashes
+_CACHE_RESERVE_GB = 10          # disk that stays free no matter what the cache wants
 _CACHE_DEFAULT_QUALITY = 88
 _cache_writes = [0]
 
+# hit/miss/eviction counters, so a cache that is holding nothing useful can be SEEN
+# rather than merely felt as "it got slow again". Reset when the process restarts.
+_cache_stats = {"hit_ram": 0, "hit_disk": 0, "miss": 0,
+                "evicted": 0, "evicted_bytes": 0, "evictions": 0}
+_stats_lock = threading.Lock()
+
+
+def _bump(key: str, n: int = 1):
+    with _stats_lock:
+        _cache_stats[key] = _cache_stats.get(key, 0) + n
+
 
 def _default_cache_gb() -> float:
-    """A disk budget the machine can actually spare: at most `_CACHE_DEFAULT_GB`, and
-    never more than a tenth of the free space. A flat 20 GB is fine on a workstation and
-    rude on a colleague's laptop — and this app is meant to be handed to colleagues."""
+    """A disk budget the machine can spare, that does NOT collapse as the disk fills.
+
+    This used to be a tenth of the FREE space, which has two bad properties. The cache's
+    own files count as "used", so the budget shrank as the cache grew — it chased its own
+    tail downwards. And it shrank fastest exactly when a full disk makes re-reading a
+    share most painful: measured on a 96 %-full disk it had fallen to **4.1 GB**, which
+    holds about twenty wells, so opening a second plate evicted the first and every frame
+    went back to the network at ~28 ms apiece.
+
+    A share of the disk's TOTAL size does not move, so the budget is stable. The reserve
+    is what protects the machine: whatever the arithmetic says, `_CACHE_RESERVE_GB` stays
+    free, and on a genuinely full disk the cache shrinks to nothing rather than making the
+    problem worse.
+    """
     try:
-        free = shutil.disk_usage(Path.home()).free / 1024 ** 3
+        du = shutil.disk_usage(Path.home())
+        total, free = du.total / 1024 ** 3, du.free / 1024 ** 3
     except Exception:                                      # noqa: BLE001
-        return 4.0
-    return max(1.0, min(float(_CACHE_DEFAULT_GB), free * 0.10))
+        return float(_CACHE_MIN_GB)
+    cap = min(float(_CACHE_DEFAULT_GB), total * _CACHE_TOTAL_FRACTION)
+    cap = max(cap, float(_CACHE_MIN_GB))                   # aim for at least this…
+    cap = min(cap, max(0.0, free - _CACHE_RESERVE_GB))     # …but never break the reserve
+    return max(0.5, cap)
+
+
+_CACHE_SETTINGS_TTL = 2.0                                  # seconds
+_cache_settings_memo = {"at": 0.0, "val": None}
 
 
 def _cache_settings():
+    """(cap_bytes, lossless, quality) — memoised, because this is on the per-FRAME path.
+
+    `_load_settings()` re-reads and re-parses the settings file every call, and a frame
+    request asks twice. Cheap on a local disk, but it is pure waste in the hot loop.
+    `_save_settings` clears the memo, so a change in Settings still takes effect at once.
+    """
+    now = time.monotonic()
+    memo = _cache_settings_memo
+    if memo["val"] is not None and now - memo["at"] < _CACHE_SETTINGS_TTL:
+        return memo["val"]
     s = _load_settings()
     raw = s.get("cache_gb")
     try:
@@ -605,7 +660,9 @@ def _cache_settings():
         q = int(s.get("cache_quality") or _CACHE_DEFAULT_QUALITY)
     except (TypeError, ValueError):
         q = _CACHE_DEFAULT_QUALITY
-    return max(0.5, cap) * 1024 ** 3, lossless, max(50, min(100, q))
+    val = (max(0.5, cap) * 1024 ** 3, lossless, max(50, min(100, q)))
+    memo["val"], memo["at"] = val, now
+    return val
 
 
 def _frame_cache_dir() -> Path:
@@ -628,7 +685,20 @@ def cache_usage() -> dict:
         free = shutil.disk_usage(_frame_cache_dir().parent).free
     except Exception:                                      # noqa: BLE001
         free = None
+    with _stats_lock:
+        st = dict(_cache_stats)
+    served = st["hit_ram"] + st["hit_disk"] + st["miss"]
+    st["served"] = served
+    st["hit_rate"] = (st["hit_ram"] + st["hit_disk"]) / served if served else None
+    # A cache that is full, evicting, and still missing is not caching anything: it is
+    # re-reading the share for every frame while charging you the disk space. Say so,
+    # because from the outside that is indistinguishable from "the app got slow again".
+    st["thrashing"] = bool(st["evictions"] and served >= 200 and (st["hit_rate"] or 0) < 0.5)
+    st["stalls"] = _IO["stalls"]
+    st["busy_rejects"] = _IO["busy"]
+    st["stalled_now"] = io_stalled()
     return {"bytes": total, "files": files, "cap_bytes": int(cap), "free_bytes": free,
+            "stats": st,
             "ram": _PNG_CACHE.stats()}          # the in-memory cache is separate + small
 
 
@@ -652,9 +722,11 @@ def _cached_png(path: Path, size: int):
     try:
         b = fp.read_bytes()
         fp.touch()                        # LRU: freshen mtime on a hit
+        _bump("hit_disk")
         return b, mime
     except OSError:
         pass
+    _bump("miss")                         # this one costs a read from the image store
     b = _to_png(path, size) if lossless else _to_jpeg(path, size, q)
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -682,13 +754,83 @@ def _evict_cache(cap: int = None):
             pass
     if total <= cap:
         return
+    _bump("evictions")
+    gone = freed = 0
     for _mt, sz, f in sorted(files):      # oldest first
         if total <= cap:
             break
         try:
-            f.unlink(); total -= sz
+            f.unlink(); total -= sz; gone += 1; freed += sz
         except OSError:
             pass
+    _bump("evicted", gone)
+    _bump("evicted_bytes", freed)
+
+
+# ---- the image store may stop answering, and that must not stop the app -----------
+# Every frame is read from wherever the plates live, and that is usually an SMB share.
+# When a share stalls, macOS blocks the read in an uninterruptible syscall — there is no
+# timeout and no way to cancel it. A browser opens about six connections to one host, so
+# six stuck reads are enough for the whole UI to stop loading images and never recover,
+# while the process sits there looking perfectly healthy.
+#
+# We cannot unblock a stuck syscall. We CAN refuse to spend the whole app on it: do the
+# read on a bounded pool, give up waiting after `_IO_TIMEOUT_S`, and once every slot is
+# occupied by a stuck read, fail immediately instead of joining the queue. The HTTP
+# connection is freed either way, so the UI stays alive and says so — and when the mount
+# comes back the stuck reads finish, the slots free themselves, and service resumes with
+# nothing to restart.
+_IO_WORKERS = 8
+# 10 s is ~360x the measured median read from a healthy SMB share (27.7 ms) — far above
+# any legitimately slow read, and short enough that the browser's handful of connections
+# come back while you are still looking at the window rather than after you gave up.
+_IO_TIMEOUT_S = 10.0            # a read this slow is a stall, not a slow disk
+_IO_QUEUE_WAIT_S = 1.0          # how long to wait for a free slot before giving up
+_IO = {"pool": None, "slots": threading.Semaphore(_IO_WORKERS),
+       "stalled_at": 0.0, "stalls": 0, "busy": 0}
+_IO_LOCK = threading.Lock()
+
+
+def _io_pool():
+    with _IO_LOCK:
+        if _IO["pool"] is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _IO["pool"] = ThreadPoolExecutor(max_workers=_IO_WORKERS,
+                                             thread_name_prefix="store")
+    return _IO["pool"]
+
+
+def io_stalled() -> bool:
+    """True if a read gave up recently — prefetch uses this to stop piling on."""
+    return (time.monotonic() - _IO["stalled_at"]) < 30.0
+
+
+def guarded_read(make, timeout: float = _IO_TIMEOUT_S):
+    """Run `make()` against the image store. Returns (value, None) or (None, reason)."""
+    from concurrent.futures import TimeoutError as _FTimeout
+    if not _IO["slots"].acquire(timeout=_IO_QUEUE_WAIT_S):
+        # every slot is held by a read that has not come back: do not add to the pile
+        with _IO_LOCK:
+            _IO["busy"] += 1
+            _IO["stalled_at"] = time.monotonic()
+        return None, "the image store is not responding"
+
+    def run():
+        try:
+            return make()
+        finally:
+            _IO["slots"].release()        # a stuck read holds its slot, which is correct
+
+    fut = _io_pool().submit(run)
+    try:
+        return fut.result(timeout=timeout), None
+    except _FTimeout:
+        with _IO_LOCK:
+            _IO["stalls"] += 1
+            _IO["stalled_at"] = time.monotonic()
+        return None, f"the image store did not answer within {timeout:.0f}s"
+    except Exception as e:                # noqa: BLE001 — a real read error, not a stall
+        return None, f"{type(e).__name__}: {e}"
 
 
 # ---- prefetch: ONE bounded, cancellable pool for the whole process ----------------
@@ -790,15 +932,17 @@ def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
     def one(fp):
         if gen != _PREFETCH["gen"]:                     # a newer well was selected
             return
+        if io_stalled():                                # the share is already in trouble:
+            return                                      # do not queue more work onto it
         try:
             _cached_png(fp, size)          # warms disk; bytes discarded
         except OSError:                                 # share vanished mid-read: the
             pass                                        # UI must not care, and must not stall
     pool = _prefetch_pool()
     for fp in jobs:
-        if gen != _PREFETCH["gen"]:
-            break
-        try:
+        if gen != _PREFETCH["gen"] or io_stalled():
+            break                                       # guessing ahead is never worth
+        try:                                            # making a stalled share worse
             pool.submit(one, fp)
         except RuntimeError:                            # pool shutting down
             break
@@ -1111,8 +1255,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _err(self, code, msg):
-        self._send(code, {"error": msg})
+    def _err(self, code, msg, extra=None):
+        self._send(code, {"error": msg}, extra=extra)
 
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
@@ -1235,10 +1379,30 @@ class Handler(BaseHTTPRequestHandler):
         fp = _frame_path(man, well, ch, tp, z)
         if fp is None and z is not None:            # fall back to the middle slice
             fp = _frame_path(man, well, ch, tp)
-        if fp is None or not fp.is_file():
+        if fp is None:
             return self._err(404, f"no frame {well}/{ch}/{tp}")
-        body, mime = _PNG_CACHE.get_or((str(fp), size, _cache_settings()[1:]),
-                                       lambda: _cached_png(fp, size))  # RAM -> disk -> decode
+        key = (str(fp), size, _cache_settings()[1:])
+        hit = _PNG_CACHE.peek(key)
+        if hit is not None:                         # already decoded: never touch the store
+            _bump("hit_ram")
+            body, mime = hit
+            return self._send(200, body, mime,
+                              extra={"Cache-Control": "public, max-age=86400"})
+        # Everything below can touch the share, INCLUDING the is_file() probe — a stalled
+        # mount blocks that too — so the whole lot goes through the guard.
+        def read():
+            if not fp.is_file():
+                return None
+            return _PNG_CACHE.get_or(key, lambda: _cached_png(fp, size))
+
+        got, why = guarded_read(read)
+        if why:
+            # 503, not a hang. The browser frees the connection and the UI keeps working;
+            # Retry-After stops it hammering a share that is already in trouble.
+            return self._err(503, why, extra={"Retry-After": "5"})
+        if got is None:
+            return self._err(404, f"no frame {well}/{ch}/{tp}")
+        body, mime = got
         self._send(200, body, mime, extra={"Cache-Control": "public, max-age=86400"})
 
     # -- export (TIF / MP4) -------------------------------------------------

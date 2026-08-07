@@ -1074,6 +1074,11 @@ function updateBigImg(){
   const img = $('#bigImg');
   updateFaders();
   if (tp == null){ img.removeAttribute('src'); renderTools(); return; }
+  // A frame the server could not read comes back 503, not a hang — say which, because a
+  // silent broken-image icon is indistinguishable from "the app is stuck" and that is
+  // exactly the confusion this whole path exists to end.
+  img.onerror = () => showFrameTrouble();
+  img.onload = () => { const b = $('#frameTrouble'); if (b) b.hidden = true; };
   img.src = frameURL(state.primary, state.channel, tp, 600, curZ(tp));
   // prefetch neighbours for a smooth fader (each at its own annotated slice)
   const tps = curTps();
@@ -1088,6 +1093,38 @@ function updateBigImg(){
     img.style.transform = rot ? ('rotate(' + rot + 'deg)') : '';
   }
 }
+// A frame failed to load. Ask the server WHY once, and put the answer on screen: an
+// unreadable frame is nearly always the share having stopped answering, and the app can
+// no longer freeze waiting for it — so the user needs telling that it gave up on purpose.
+function showFrameTrouble(){
+  let b;
+  try {
+    b = $('#frameTrouble');
+    if (!b){
+      b = elt('div', 'muted'); b.id = 'frameTrouble';
+      b.style.cssText = 'position:absolute;left:10px;right:10px;bottom:10px;padding:6px 9px;'
+        + 'border-radius:4px;background:#2a1f14;color:#e0913f;font-size:12px;z-index:5';
+      const host = ($('#bigImg') && $('#bigImg').parentElement) || document.body;
+      try {
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      } catch (e){ /* no layout engine (the headless harness) — placement is cosmetic */ }
+      host.appendChild(b);
+    }
+  } catch (e){ return; }   // a message about a failure must never become a second failure
+  b.hidden = false;
+  b.textContent = 'This image could not be read.';
+  if (showFrameTrouble._busy) return;
+  showFrameTrouble._busy = true;
+  jget('/api/cache').then(u => {
+    const st = (u && u.stats) || {};
+    if (st.stalled_now || st.stalls){
+      b.textContent = 'The folder your plates live in stopped answering, so PlateNotate '
+        + 'gave up on this image instead of freezing. Check the share is still mounted — '
+        + 'it will pick up again on its own once it responds.';
+    }
+  }).catch(() => {}).then(() => { showFrameTrouble._busy = false; });
+}
+
 // Broadcast the current (well, tp) to every registered tool so it can redraw
 // (rotation transform / measurement overlay). Called at the end of updateBigImg.
 function renderTools(){
@@ -1265,7 +1302,7 @@ function renderSettings(body){
   cap.value = s.cache_gb || '';                          // blank = automatic
   cap.placeholder = 'auto';
   cap.title = 'Disk space the cache may use. Leave blank for automatic '
-            + '(a tenth of the free space, at most 20 GB).';
+            + '(a small share of this disk, at most 20 GB, always leaving 10 GB free).';
   cap.onchange = () => { s.cache_gb = Number(cap.value) > 0 ? Number(cap.value) : 0; push(); };
   const loss = elt('input'); loss.type = 'checkbox'; loss.checked = !!s.cache_lossless;
   loss.onchange = () => { s.cache_lossless = loss.checked; push(); };
@@ -1273,15 +1310,40 @@ function renderSettings(body){
   ll.appendChild(document.createTextNode(' lossless (bigger, exact pixels)'));
   crow.append(elt('span', 'muted', 'limit'), cap, elt('span', 'muted', 'GB'), ll);
   scache.appendChild(crow);
+  const cwarn = elt('div', 'muted'); cwarn.style.marginTop = '6px'; cwarn.hidden = true;
+  scache.appendChild(cwarn);
   jget('/api/cache').then(u => {
     const gb = b => (b || 0) / 1073741824;
     const ram = u.ram || {};
+    const st = u.stats || {};
     cinfo.textContent =
       `disk ${gb(u.bytes).toFixed(1)} GB in ${(u.files || 0).toLocaleString()} frames`
       + ` · limit ${gb(u.cap_bytes).toFixed(1)} GB`
       + (u.free_bytes != null ? ` · ${gb(u.free_bytes).toFixed(0)} GB free` : '')
       + `  ·  memory ${Math.round((ram.bytes || 0) / 1048576)} MB`
       + ` of ${Math.round((ram.cap_bytes || 0) / 1048576)} MB`;
+    // A hit rate is the only honest measure of whether the cache is doing anything.
+    if (st.served) {
+      cinfo.textContent += `\n${Math.round((st.hit_rate || 0) * 100)}% of `
+        + `${st.served.toLocaleString()} frames served from cache`
+        + (st.evicted ? ` · ${st.evicted.toLocaleString()} evicted to stay under the limit` : '');
+      cinfo.style.whiteSpace = 'pre-line';
+    }
+    const msg = [];
+    if (st.thrashing) {
+      msg.push('The cache is full and still missing most frames, so nearly every image is '
+        + 'being re-read from where the plates live. That is what "it got slow again" is. '
+        + 'Raise the limit above, or work from a local copy of the plates.');
+    }
+    if (st.stalled_now || st.stalls) {
+      msg.push(`The image store stopped answering ${st.stalls} time(s)`
+        + (st.stalled_now ? ' — including just now' : '')
+        + '. Images that fail with a "not responding" error are that, not lost data; '
+        + 'check the share is still mounted.');
+    }
+    cwarn.hidden = !msg.length;
+    cwarn.textContent = msg.join(' ');
+    cwarn.style.color = msg.length ? 'var(--warn, #e0913f)' : '';
   }).catch(() => { cinfo.textContent = 'unavailable'; });
 
   // ---- version + update ----------------------------------------------------

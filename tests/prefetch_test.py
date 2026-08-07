@@ -21,6 +21,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -175,9 +176,13 @@ try:
     free_gb = _sh.disk_usage(Path.home()).free / 1024 ** 3
     check(1.0 <= auto <= 20.0,
           f"the automatic disk cap is bounded (got {auto:.1f} GB, max 20)")
-    check(auto <= max(1.0, free_gb * 0.1000001),
-          f"…and never more than a tenth of the free space "
-          f"({auto:.1f} GB vs {free_gb:.0f} GB free)")
+    # This used to assert "never more than a tenth of the FREE space". That rule was the
+    # bug, not the contract: it shrank as the cache grew into that free space, and it
+    # collapsed to 4.1 GB on a 96%-full disk — less than one plate. What must hold now is
+    # the promise that actually protects the machine: the reserve stays free.
+    check(auto <= max(0.5, free_gb - server._CACHE_RESERVE_GB) + 0.01,
+          f"…and always leaves {server._CACHE_RESERVE_GB} GB of disk free "
+          f"({auto:.1f} GB cap vs {free_gb:.0f} GB free)")
 
     # the RAM cache is bounded by BYTES, not by a frame count: 1500 frames is 75 MB of
     # small JPEGs but ~600 MB of big PNGs, so a count is not a memory budget at all.
@@ -209,6 +214,76 @@ try:
     # ---- the pool is bounded ---------------------------------------------------
     check(server._PREFETCH_WORKERS <= 16,
           f"the prefetch pool is bounded ({server._PREFETCH_WORKERS} workers, shared)")
+
+    # ---- the disk budget does not collapse as the disk fills -------------------
+    # It used to be a tenth of the FREE space, so it shrank as the cache grew (its own
+    # files count as used) AND shrank fastest on a full disk — measured at 4.1 GB on a
+    # 96%-full disk, about twenty wells, which is less than one plate.
+    import shutil as _sh
+    real_usage = _sh.disk_usage
+
+    class FakeDisk:
+        def __init__(self, total_gb, free_gb):
+            self.total = int(total_gb * 1024 ** 3)
+            self.free = int(free_gb * 1024 ** 3)
+            self.used = self.total - self.free
+
+    def cap_for(total_gb, free_gb):
+        _sh.disk_usage = lambda _p: FakeDisk(total_gb, free_gb)
+        try:
+            server._cache_settings_memo["val"] = None
+            return server._default_cache_gb()
+        finally:
+            _sh.disk_usage = real_usage
+            server._cache_settings_memo["val"] = None
+
+    roomy = cap_for(926, 41)              # Tiago's machine: 926 GB disk, 96% full
+    check(roomy >= 10,
+          f"a 96%-full 926 GB disk still gets a usable cache ({roomy:.1f} GB, was 4.1)")
+    check(roomy <= server._CACHE_DEFAULT_GB,
+          f"and never more than the {server._CACHE_DEFAULT_GB} GB ceiling ({roomy:.1f})")
+    small = cap_for(256, 30)              # a colleague's laptop
+    check(0.5 <= small <= 20 and small <= 30 - server._CACHE_RESERVE_GB + 0.01,
+          f"a small laptop gets a proportionate cache, reserve intact ({small:.1f} GB)")
+    desperate = cap_for(926, 6)           # genuinely out of disk
+    check(desperate <= 1.0,
+          f"a disk with 6 GB left is not made worse ({desperate:.1f} GB)")
+    check(cap_for(926, 41) == cap_for(926, 41), "the budget is stable, not drifting")
+    # the old rule's actual failure: 10% of free SHRANK as the cache grew into that free
+    # space. Basing it on total size means holding more cache cannot lower the budget.
+    check(cap_for(926, 41) >= cap_for(926, 25),
+          "filling the disk with cache cannot lower the budget below what is already held")
+
+    # ---- a store that never answers must not take the app with it --------------
+    stuck = threading.Event()
+
+    def never_returns():
+        stuck.wait(30)                    # a stalled SMB read: uncancellable, no timeout
+        return b"too late", "image/jpeg"
+
+    t0 = time.monotonic()
+    val, why = server.guarded_read(never_returns, timeout=0.5)
+    waited = time.monotonic() - t0
+    check(val is None and why, f"a read that never returns gives up instead of blocking ({why})")
+    check(waited < 5, f"and gives up promptly ({waited:.2f}s, not forever)")
+    check(server.io_stalled(), "a stall is remembered, so prefetch stops piling on")
+
+    # fill every slot with stuck reads, then prove a new caller is refused FAST rather
+    # than joining a queue behind them — this is what keeps the browser's connections free
+    for _ in range(server._IO_WORKERS):
+        server.guarded_read(never_returns, timeout=0.01)
+    t0 = time.monotonic()
+    val, why = server.guarded_read(lambda: b"x", timeout=10)
+    refused = time.monotonic() - t0
+    check(val is None and why, "with every slot stuck, a new read is refused, not queued")
+    check(refused < 4, f"refused fast ({refused:.2f}s) so the UI keeps its connections")
+    stuck.set()                           # let the fake reads finish and free their slots
+
+    u = server.cache_usage()
+    st = u.get("stats", {})
+    check({"hit_ram", "hit_disk", "miss", "hit_rate", "thrashing"} <= set(st),
+          f"cache reports hit rate and thrashing, not just size (got {sorted(st)[:6]}…)")
+    check(st.get("stalls", 0) >= 1, "stalls are counted so the UI can say what happened")
 
     print(f"\nprefetch_test: {passed} passed, {failed} failed")
 finally:

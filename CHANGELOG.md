@@ -4,6 +4,61 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.6.0] — 2026-08-07
+
+### A share that stops answering can no longer freeze the app
+
+Reported as "at some point it hangs and never comes back — it stops loading images".
+
+Every frame is read from wherever the plates live, usually an SMB share. When a share
+stalls, macOS blocks the read in an **uninterruptible syscall** — no timeout, no way to
+cancel it. A browser opens about six connections to one host, so six stuck reads were
+enough for the whole interface to stop loading images and never recover, while the process
+sat there looking perfectly healthy and the traceback-free silence gave nothing to go on.
+
+A stuck syscall still cannot be unblocked. What it no longer does is consume the app:
+
+- Reads that touch the image store now run on a **bounded pool with a 10 s timeout** (~360×
+  the 27.7 ms median measured against a healthy share). Past that the request answers
+  **503 instead of hanging**, so the browser gets its connection back.
+- Once every slot is held by a stuck read, further requests are **refused in under a
+  second** rather than queueing behind them.
+- Frames already decoded in memory are served **without touching the store at all**, so a
+  stalled share cannot slow down what the app is already holding.
+- Prefetch **stops** when the store is in trouble instead of piling more work onto it.
+- It **self-heals**: when the mount answers again the stuck reads finish, the slots free
+  themselves, and service resumes with nothing to restart.
+- A frame that fails now **says why on screen** — "the folder your plates live in stopped
+  answering" — instead of a silent broken-image icon that looks identical to a freeze.
+
+Measured end to end: with 20 concurrent frame requests against a store that never answers,
+all 20 returned 503 and none hung, while `/api/version` answered in 104 ms and the page in
+1 ms. Before, those requests held their threads indefinitely.
+
+### The disk cache no longer collapses as the disk fills
+
+The automatic limit was *a tenth of the free space*, which has two bad properties: the
+cache's own files count as "used", so the budget shrank as the cache grew — it chased its
+own tail — and it shrank fastest exactly when a full disk makes re-reading a share most
+painful. Measured on a 96 %-full disk it had fallen to **4.10 GB holding 74,820 frames —
+about twenty wells, less than a single plate**. Opening a second plate evicted the first,
+so going back re-read every frame from the network at ~28 ms apiece. That is the
+"it gets slow again" half of the same report.
+
+The limit is now a share of the disk's **total** size, which does not move, capped at
+20 GB and always leaving **10 GB free** whatever the arithmetic says. On the machine above
+that is 18.5 GB instead of 4.1 GB. On a genuinely full disk it still shrinks to nothing,
+because filling someone's disk is not an acceptable way to be fast.
+
+### You can now see whether the cache is doing anything
+
+`/api/cache` and **Settings → Image cache** report the **hit rate**, evictions, and stalls,
+and warn outright when the cache is full and still missing most frames — the state where
+it is costing you disk space and buying nothing. Previously the only symptom was the app
+feeling slow again, with no way to tell that from a slow share.
+
+Also: the cache settings are no longer re-read and re-parsed from disk twice per frame.
+
 ## [1.5.3] — 2026-08-07
 
 ### The Windows test could not start the app it was testing
