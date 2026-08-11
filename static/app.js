@@ -75,7 +75,8 @@ async function boot(){
   // so surface where annotations are actually being saved.
   if (state.cfg.db){
     const d = state.cfg.db;
-    if (d.local_fallback) setStatus('annotations saved to a LOCAL database (this share isn\'t written to)', 'saved');
+    if (d.local_fallback) setStatus('annotations saved to a database ON THIS COMPUTER — '
+      + 'the folder with your images could not be written to', 'saved');
     if (d.db_path) { const sb = $('#saveBtn'); if (sb) sb.title = 'Save now (s) — DB: ' + d.db_path; }
   }
   // annotator name suggestions (known annotators from the DB)

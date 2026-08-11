@@ -4,6 +4,56 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.6.1] — 2026-08-11
+
+### Fixed — on Windows the app could not tell whether it was allowed to write
+
+Reported as "the TIF export doesn't work, and possibly the MP4 — I think there's a write
+block, and maybe that's why the annotations aren't going into a database". Both, and the
+same root cause: **every check for "can I write here?" and "is this a share?" gave the
+wrong answer on Windows.**
+
+- **`os.access(folder, os.W_OK)` reads the POSIX permission bits, and Windows does not use
+  them.** There it reports the read-only *attribute* and ignores the ACL actually in
+  force, so a folder the user genuinely cannot write to answered **"writable"**. The app
+  then aimed the database at it, and the failure surfaced much later and somewhere else.
+  Writability is now decided by **writing a probe file**, which cannot be wrong on any
+  operating system.
+- **`_is_network_fs` shelled out to `mount`, which Windows does not have.** It raised,
+  was caught, and returned `False` for *everything* — so every Windows user on a mapped
+  drive or a UNC path was told their share was local disk, and the database was created
+  **on the share**, where SQLite's write-ahead log is exactly what you must not use. It
+  now asks Windows: a UNC path is a share, and a mapped drive is checked with
+  `GetDriveTypeW`.
+- **Exports were written into the plate folder with no check at all.** On a read-only
+  share the job ran to completion and produced nothing. The destination is now **probed
+  before the work starts**; if it is refused, the files go to
+  `~/Documents/PlateNotate exports/` and **the job says so** — silently writing somewhere
+  else is how "the export did nothing" happens, because the folder you go and look in is
+  empty.
+
+### You are now told when your annotations are not with your images
+
+`local_fallback` reported *"was the source a network share?"* — a different question,
+which answered **False** for the case that actually bites: a folder that is not a share
+but still refuses writes. The database quietly lived somewhere else and nothing on screen
+said so. It now reports where the file **is**, so the banner appears whenever annotations
+end up on this computer rather than beside the plates.
+
+### A failed export leaves evidence
+
+A packaged app has no console, so the traceback went nowhere — which is how "the export
+doesn't work" arrives with nothing attached. Failures are now appended to
+`~/.medaka_annotator/platenotate-export-errors.log`, and the on-screen message names the
+folder and the likely cause instead of a bare `[Errno 13]`.
+
+### Fixed — a test could rewrite your own settings
+
+`db_location_test.py` wrote to the real `~/.medaka_annotator/settings.json`, including
+`annotations_dir`. That is one bad line away from the "where did my database go" scare the
+file exists to prevent. It now runs against a scratch home, and asserts that isolation
+before a single test runs.
+
 ## [1.6.0] — 2026-08-07
 
 ### A share that stops answering can no longer freeze the app

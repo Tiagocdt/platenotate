@@ -27,6 +27,35 @@ import well_hyperstack as wh          # noqa: E402
 import focus_cut as fc                # noqa: E402
 import compose                        # noqa: E402  (the Render-options composer)
 
+def _can_write(folder) -> bool:
+    """Can we really write here? Find out by WRITING something.
+
+    `os.access(..., W_OK)` answers from the POSIX permission bits, and Windows does not
+    use them — there it reports the read-only *attribute* and ignores the ACL actually in
+    force, so an unwritable folder answers "writable". An export then ran to completion
+    and produced nothing. A probe file cannot be wrong on any operating system.
+    (server.can_write is the same check; duplicated rather than imported, because
+    export.py must stay importable without pulling the server in.)
+    """
+    import os
+    try:
+        p = Path(folder)
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / f".platenotate-write-probe-{os.getpid()}"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def _fallback_export_root() -> Path:
+    """Somewhere a person will find them, that is always writable: their own Documents."""
+    home = Path.home()
+    docs = home / "Documents"
+    return (docs if docs.is_dir() else home) / "PlateNotate exports"
+
+
 # job_id -> {status, msg, phase, done, total, out, files, kind, label, t0, started}
 _JOBS = {}
 
@@ -176,6 +205,20 @@ def _run(job_id, spec, data_root, smb_root):
             if add:
                 job["cur_done"] = job.get("cur_done", 0) + int(add)
 
+    def _note_redirect(why):
+        """Record, once, that the files are not going where the user would expect.
+
+        Silently writing somewhere else is how "the export did nothing" happens: the job
+        says done, and the folder they go and look in is empty."""
+        with lock:
+            notes = job.setdefault("notes", [])
+            msg = f"{why} — saved to {_fallback_export_root()} instead"
+            if msg not in notes:
+                notes.append(msg)
+
+    def _fallback_dest(plate, label):
+        return _fallback_export_root() / plate / label
+
     def build_done():
         """Mark one output build (a well/montage/channel) finished."""
         with lock:
@@ -192,8 +235,32 @@ def _run(job_id, spec, data_root, smb_root):
         use_anno = bool(spec.get("use_annotations"))
         edir = (spec.get("export_dir") or "").strip()   # Settings: where TIF/MP4 exports go
 
-        def _dest(plate, label):                         # <export_dir>/<plate>/<label>/ | None
-            return (Path(edir).expanduser() / plate / label) if edir else None
+        def _dest(plate, label):
+            """<export_dir>/<plate>/<label>/, or None to let the engine write beside the
+            plate — but only ever a folder we have PROVEN we can write to.
+
+            With no export folder set, the engine writes into
+            `<plate>/processed/detailed/<label>/`. Nothing checked that the plate folder
+            accepts writes, so a read-only share — or any Windows folder whose ACL says
+            no, which `os.access` cheerfully calls writable — produced an export that
+            simply never appeared. Probe first; if the usual place is refused, put the
+            files somewhere that works and TELL the user where they went.
+            """
+            if edir:
+                d = Path(edir).expanduser() / plate / label
+                if _can_write(d):
+                    return d
+                _note_redirect(f"the export folder ({Path(edir).expanduser()}) cannot be "
+                               f"written to")
+                return _fallback_dest(plate, label)
+            pdir = _plate_dir(plate, by_plate.get(plate) or [], data_root, smb_root)
+            if pdir is None:
+                return None            # the plate itself is missing; let the engine say so
+            beside = Path(pdir) / "processed" / "detailed" / label
+            if _can_write(beside):
+                return None                              # the engine's own default is fine
+            _note_redirect(f"the plate folder ({pdir}) cannot be written to")
+            return _fallback_dest(plate, label)
 
         render = spec.get("render") or {}
         composed = kind == "mp4" and _needs_compose(spec)
@@ -310,8 +377,27 @@ def _run(job_id, spec, data_root, smb_root):
                        out=str(z), files=outs)
     except Exception as e:                                      # noqa: BLE001
         import traceback
+        tb = traceback.format_exc()
         traceback.print_exc()
-        job.update(status="error", msg=str(e), phase=f"error: {e}")
+        # A packaged app has no console, so print_exc() goes nowhere at all — which is how
+        # "the export doesn't work" arrives with nothing attached. Leave the whole thing
+        # somewhere it can be found and sent on.
+        try:
+            log = Path.home() / ".medaka_annotator" / "platenotate-export-errors.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} · {job.get('label')}\n")
+                fh.write(f"spec: {spec!r}\n{tb}")
+        except OSError:
+            pass
+        msg = str(e)
+        if isinstance(e, OSError):
+            # name the folder and the likely cause: a bare "[Errno 13]" tells a
+            # collaborator nothing they can act on
+            where = getattr(e, "filename", None) or ""
+            msg = (f"could not write {where or 'the output'} — the folder may be "
+                   f"read-only or on a share you cannot write to ({e})")
+        job.update(status="error", msg=msg, phase=f"error: {msg[:120]}")
 
 
 def start(spec, data_root, smb_root):

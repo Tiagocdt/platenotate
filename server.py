@@ -297,7 +297,7 @@ def _resolve_db_location(data_root: Path):
             return folder, found
     # nothing yet: create beside the images (the dir holding AQ-EMBL, if that's the shape)
     create_folder = data_root.parent if data_root.name == "AQ-EMBL" else data_root
-    if os.access(create_folder, os.W_OK):
+    if can_write(create_folder):
         return create_folder, None
     adir = (_load_settings().get("annotations_dir") or "").strip()
     if adir:                                             # can't write next to the images
@@ -306,10 +306,54 @@ def _resolve_db_location(data_root: Path):
     return create_folder, None                           # _autocreate_db falls back locally
 
 
+def can_write(folder) -> bool:
+    """Can we really write here? Find out by WRITING something.
+
+    This used to be `os.access(folder, os.W_OK)`, which answers from the POSIX permission
+    bits — and **Windows does not use them**. There it reports the read-only *attribute*
+    and ignores the ACL that is actually in force, so a folder the user genuinely cannot
+    write to answers "writable". The app then decided to put the database there, and the
+    failure surfaced much later and somewhere else: annotations that never landed, an
+    export that produced nothing. A probe file costs one create+delete and cannot be
+    wrong on any operating system.
+    """
+    try:
+        p = Path(folder)
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / f".platenotate-write-probe-{os.getpid()}"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
 def _is_network_fs(path) -> bool:
     """Best-effort: True if `path` sits on a network filesystem (SMB/NFS/AFP), where an
     SQLite WAL DB is unreliable — so we keep the annotator DB on local disk instead
     (aulehla is also ~full and corrupts writes). Falls back to False (treat as local)."""
+    if sys.platform == "win32":
+        # Windows has no `mount`, so the POSIX branch below raised FileNotFoundError and
+        # returned False for EVERYTHING — including a mapped drive or a UNC path. Every
+        # Windows user on a share was therefore told their share was local disk, and the
+        # database was created ON the share, where SQLite's WAL is exactly what you must
+        # not use. Ask Windows instead.
+        raw = str(path)
+        if raw.startswith("\\\\") or raw.startswith("//"):
+            return True                    # a UNC path IS a share, whatever the cwd is
+        try:
+            s = str(Path(path).absolute())
+        except Exception:                                  # noqa: BLE001
+            s = raw
+        try:
+            import ctypes
+            drive = os.path.splitdrive(s)[0]
+            if not drive:
+                return False
+            DRIVE_REMOTE = 4
+            return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == DRIVE_REMOTE
+        except Exception:                                  # noqa: BLE001
+            return False
     try:
         import subprocess
         target = str(Path(path).resolve())
@@ -365,10 +409,28 @@ def _open_process_db(data_root: Path, auto_create: bool = True):
         path = _autocreate_db(folder, net)
     if path is not None:
         _DB["conn"] = db_store.open_db(path, check_same_thread=False)
-        _DB["path"], _DB["needs_db"], _DB["local_fallback"] = path, False, net
+        _DB["path"], _DB["needs_db"] = path, False
+        _DB["local_fallback"] = _db_is_fallback(path)
     else:
         _DB["conn"], _DB["path"], _DB["needs_db"], _DB["local_fallback"] = None, None, True, False
     return _DB
+
+
+def _db_is_fallback(path) -> bool:
+    """True when the database did NOT end up with the images, but in the app's own
+    private corner because nowhere better would take it.
+
+    This used to be reported as "was the source a network share?", which is a different
+    question — and it answers False for the case that actually bites: a folder that is
+    not a share but still refuses writes. The database then quietly lived somewhere else
+    and nothing on screen said so, and "where did my annotations go" is the most alarming
+    way this app can fail. Ask where the file IS.
+    """
+    try:
+        home = str((Path.home() / ".medaka_annotator").resolve())
+        return str(Path(path).resolve()).startswith(home + os.sep)
+    except Exception:                                      # noqa: BLE001
+        return False
 
 
 def _db_info() -> dict:
