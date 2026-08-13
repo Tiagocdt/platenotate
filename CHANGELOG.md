@@ -4,6 +4,29 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.7.1] — 2026-08-13
+
+### Fixed — closing the window did not close the app
+
+Reported: while a plate is loading — minutes, over a share — PlateNotate cannot be closed
+except by Force Quit.
+
+`ThreadPoolExecutor` registers an atexit hook that **joins every worker it ever started**,
+and those workers are not daemon threads. PlateNotate runs two such pools — 12 prefetch
+workers and 8 image-store readers — and over a share, during a load that takes minutes,
+sitting inside a slow read is their *normal* state. So closing the window returned from
+the GUI loop, `main()` returned, and then Python refused to exit until every one of those
+reads finished: no window, still running, Force Quit the only way out.
+
+Measured, with one stuck worker and a `main()` that returned instantly: **8.1 s to exit
+via `sys.exit()`, 0.1 s now.** The app leaves when you close it, whatever the workers are
+doing. Nothing is lost by that — annotations are committed by the request that made them,
+not buffered until exit, and the database connection is closed first so the WAL is
+checkpointed.
+
+This got worse in 1.6.0, which added the second pool: the stalled-share fix bounded how
+long a *request* waits, but a stuck worker still held the interpreter open at exit.
+
 ## [1.7.0] — 2026-08-13
 
 ### The arrows move wells again when you are annotating wells

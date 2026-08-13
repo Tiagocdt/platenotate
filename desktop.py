@@ -421,6 +421,39 @@ def main(argv=None):
     return 0
 
 
+def _exit_now(code: int = 0) -> None:
+    """Close the window, quit the app. Whatever the worker threads are doing.
+
+    `ThreadPoolExecutor` registers an atexit hook that JOINS every worker it ever
+    started, and those workers are not daemon threads. PlateNotate runs two such pools —
+    12 prefetch workers and 8 image-store readers — and over a share, during a load that
+    takes minutes, sitting inside a slow read is their NORMAL state. So closing the
+    window returned from the GUI loop, `main()` returned, and then Python refused to exit
+    until every one of those reads finished: no window, still running, Force Quit the
+    only way out.
+
+    Measured, with one stuck worker and a `main()` that returned instantly: the process
+    took exactly as long to exit as the read did.
+
+    Leaving abruptly costs nothing here. Annotations are committed by the request that
+    made them — there is no write buffer waiting for a clean shutdown — and the database
+    connection is closed first so the WAL is checkpointed.
+    """
+    try:
+        conn = server._DB.get("conn")
+        if conn is not None:
+            conn.close()               # checkpoint the WAL; cheap, and never blocks on IO
+    except Exception:                  # noqa: BLE001
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream:
+                stream.flush()
+        except Exception:              # noqa: BLE001
+            pass
+    os._exit(code)
+
+
 def _report_crash(tb: str) -> None:
     """Turn "Failed to execute script 'desktop'" into something someone can act on.
 
@@ -450,10 +483,14 @@ def _report_crash(tb: str) -> None:
 
 
 if __name__ == "__main__":
+    # _exit_now(), not sys.exit(): sys.exit runs the interpreter's shutdown, and that is
+    # where the app used to hang forever behind a worker stuck in a slow read. Only the
+    # real app takes this path — main() itself still returns normally, so the tests can
+    # call it.
     try:
-        sys.exit(main() or 0)
-    except SystemExit:
-        raise
+        _exit_now(main() or 0)
+    except SystemExit as e:
+        _exit_now(e.code if isinstance(e.code, int) else 0)
     except BaseException:                       # noqa: BLE001 — nothing may escape here
         _report_crash(traceback.format_exc())
-        sys.exit(1)
+        _exit_now(1)

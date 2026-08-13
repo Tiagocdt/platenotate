@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -303,6 +304,43 @@ with tempfile.TemporaryDirectory() as td, temp_home():
     check(rc == 0, "main() returns cleanly when the window cannot be opened")
     check(len(calls) == 1 and calls[0][0].startswith("http://127.0.0.1:"),
           f"the running server is handed to the browser instead ({calls[:1]})")
+
+# ══ closing the window must actually quit the app ═════════════════════════════
+# The reported symptom: while a plate is loading (minutes, over a share) the app cannot
+# be closed except by Force Quit. Cause: ThreadPoolExecutor registers an atexit hook that
+# JOINS every worker it ever started, and those workers are not daemons. PlateNotate runs
+# two such pools — 12 prefetch, 8 image-store — and being inside a slow read is their
+# normal state during a load. So the window closed, main() returned, and Python then sat
+# waiting for reads that had minutes left to run.
+import subprocess                                                     # noqa: E402
+
+PROOF = r"""
+import sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
+sys.path.insert(0, %r)
+stuck = threading.Event()
+pool = ThreadPoolExecutor(max_workers=2)
+pool.submit(lambda: stuck.wait(8))         # a worker inside a slow read
+t0 = time.monotonic()
+%s
+"""
+HERE_S = str(HERE.parent)
+
+t0 = time.monotonic()
+plain = subprocess.run([sys.executable, "-c", PROOF % (HERE_S, "sys.exit(0)")],
+                       capture_output=True, timeout=60)
+plain_s = time.monotonic() - t0
+check(plain_s > 5,
+      f"REPRODUCED: sys.exit() waits for the stuck worker ({plain_s:.1f}s, not instant)")
+
+t0 = time.monotonic()
+fixed = subprocess.run([sys.executable, "-c",
+                        PROOF % (HERE_S, "import desktop; desktop._exit_now(0)")],
+                       capture_output=True, timeout=60)
+fixed_s = time.monotonic() - t0
+check(fixed.returncode == 0, f"_exit_now leaves with the right exit code ({fixed.returncode})")
+check(fixed_s < 5,
+      f"…and leaves AT ONCE, not when the read finishes ({fixed_s:.1f}s vs {plain_s:.1f}s)")
 
 # ══ a crash is written down and read out ══════════════════════════════════════
 with temp_home() as home:
