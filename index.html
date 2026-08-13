@@ -14,26 +14,26 @@
   <label class="tb">Plate
     <select id="plateSelect" title="Choose a processed plate folder"></select>
   </label>
-  <button id="openFolderBtn" class="btn ghost" title="Open a folder of image data (on this computer or a network share)">📂 Open</button>
-  <button id="filterBtn" class="btn" title="Filter wells across ALL plates">🔎 Filter</button>
-  <button id="clearFilterBtn" class="btn ghost" title="Back to single plate" hidden>✕ filter</button>
-  <button id="tifBtn" class="btn" title="Export the selected wells as a TIF hyperstack">⤓ TIF</button>
-  <button id="mp4Btn" class="btn" title="Export the selected wells as an MP4 movie">⤓ MP4</button>
+  <button id="openFolderBtn" class="btn ghost" title="Open a folder of image data (on this computer or a network share)">Open</button>
+  <button id="filterBtn" class="btn" title="Filter wells across ALL plates">Filter</button>
+  <button id="clearFilterBtn" class="btn ghost" title="Back to single plate" hidden>Clear filter</button>
+  <button id="tifBtn" class="btn" title="Export the selected wells as a TIF hyperstack">TIF</button>
+  <button id="mp4Btn" class="btn" title="Export the selected wells as an MP4 movie">MP4</button>
   <label class="tb">Annotator
     <input id="annotator" type="text" placeholder="your name" size="10" list="annotatorList"
            title="Who you're saving as (press Enter to set). Not a filter — all annotations show regardless.">
     <datalist id="annotatorList"></datalist>
   </label>
   <span class="grow"></span>
-  <button id="undoBtn" class="btn" title="Undo (z)" disabled>↶ Undo</button>
-  <button id="redoBtn" class="btn" title="Redo (Shift+Z)" disabled>↷ Redo</button>
+  <button id="undoBtn" class="btn" title="Undo (z)" disabled>Undo</button>
+  <button id="redoBtn" class="btn" title="Redo (Shift+Z)" disabled>Redo</button>
   <button id="saveBtn" class="btn" title="Save now (s)">Save</button>
   <span id="saveStatus" class="status">—</span>
   <!-- export jobs live in the top bar (hidden until the first export is queued) -->
   <button id="jobToggle" class="btn jobToggle" title="Export jobs — click to expand" hidden>
     <span class="jobDot" id="jobDot"></span><span id="jobToggleLabel">Jobs</span><span id="jobCaret" aria-hidden="true">▾</span>
   </button>
-  <button id="settingsToggle" class="btn ghost" title="Settings — storage, formats, paths & help">⚙</button>
+  <button id="settingsToggle" class="btn ghost" title="Settings — storage, formats, paths & help">Settings</button>
 </header>
 
 <!-- export job panel — drops down from the Jobs button in the top bar -->
@@ -81,14 +81,21 @@
     <div class="leftfoot muted" id="selInfo">no wells selected</div>
   </section>
 
+  <!-- drag to rebalance grid vs detail; double-click resets -->
+  <div id="splitV" class="splitter v" title="Drag to resize · double-click to reset"></div>
+
   <!-- RIGHT: detail + annotation panel -->
   <section id="right">
     <div id="detail">
       <div class="detailhead">
         <b id="detailWell">—</b>
-        <span class="chToggle">
-          <button class="btn sm chBtn" data-ch="BF">BF</button>
-          <button class="btn sm chBtn" data-ch="FL">FL</button>
+        <!-- channel: a fader like z / rotation / time, so every axis of the image is
+             driven the same way. Hidden when the plate has only one channel. -->
+        <span id="chRow" class="fader chfader" hidden>
+          <span class="fkey">ch</span>
+          <input id="chslider" type="range" min="0" max="0" value="0" step="1"
+                 title="Channel (c cycles)">
+          <span id="chval" class="fval">—</span>
         </span>
         <span class="grow"></span>
         <span id="frameInfo" class="muted">—</span>
@@ -96,28 +103,36 @@
       <div id="stage">
         <img id="bigImg" alt="selected well frame" draggable="false">
       </div>
-      <div class="scrubrow">
-        <button id="playBtn" class="btn sm" title="Play / pause (space)">▶</button>
-        <div id="scrubWrap">
-          <input id="scrub" type="range" min="0" max="0" value="0">
-          <div id="rangeBar" hidden></div>
-          <div id="rhStart" class="rhandle" hidden title="drag: range start"></div>
-          <div id="rhEnd" class="rhandle" hidden title="drag: range end"></div>
+      <!-- The four axes of a frame — time, z, rotation, channel — are all faders, built
+           the same way: a fixed-width key on the left, the track, the value right-
+           aligned in tabular figures. z and rot carry a record toggle: dragging always
+           just LOOKS; the toggle is what writes a keyframe. -->
+      <div class="faders">
+        <div id="scrubrow" class="fader">
+          <button id="playBtn" class="fkey fkey-btn" title="Play / pause (space)">play</button>
+          <div id="scrubWrap">
+            <input id="scrub" type="range" min="0" max="0" value="0">
+            <div id="rangeBar" hidden></div>
+            <div id="rhStart" class="rhandle" hidden title="drag: range start"></div>
+            <div id="rhEnd" class="rhandle" hidden title="drag: range end"></div>
+          </div>
+          <span id="tpval" class="fval">—</span>
+        </div>
+        <div id="zrow" class="fader" hidden>
+          <button id="zrec" class="fkey fkey-btn reclab" title="z-slice. Drag to look through the stack. Switch on to record the slice as a focus keyframe at each timepoint.">z</button>
+          <input id="zslider" type="range" min="1" max="1" value="1">
+          <span id="zval" class="fval">—</span>
+        </div>
+        <div id="rotrow" class="fader" hidden>
+          <button id="rotrec" class="fkey fkey-btn reclab" title="rotation. Drag to preview. Switch on to record the angle as a rotation keyframe (interpolates the short way).">rot</button>
+          <input id="rotslider" type="range" min="0" max="359" value="0">
+          <span id="rotval" class="fval">—</span>
         </div>
       </div>
-      <!-- z-slice + rotation faders: always draggable to LOOK; the button records the
-           drag as keyframes when switched on (off = browse only). -->
-      <div id="zrow" class="zrow" hidden>
-        <button id="zrec" class="reclab" title="z-slice. Drag to look through the stack. Switch on to record the slice as a focus keyframe at each timepoint.">z</button>
-        <input id="zslider" type="range" min="1" max="1" value="1">
-        <span id="zval" class="muted mono">—</span>
-      </div>
-      <div id="rotrow" class="rotrow" hidden>
-        <button id="rotrec" class="reclab" title="rotation. Drag to preview. Switch on to record the angle as a rotation keyframe (interpolates the short way).">rot</button>
-        <input id="rotslider" type="range" min="0" max="359" value="0">
-        <span id="rotval" class="muted mono">—</span>
-      </div>
     </div>
+
+    <!-- drag to rebalance the image against the annotation panel below it -->
+    <div id="splitH" class="splitter h" title="Drag to resize · double-click to reset"></div>
 
     <div id="panel">
       <div class="tabs">

@@ -43,7 +43,16 @@ class StubElement {
     this.parentNode = null;
     this._attrs = {};
     this.dataset = {};
-    this.style = {};
+    // A real CSSStyleDeclaration, not a bare object: the resizable panes set layout via
+    // custom properties, and a stub without setProperty made that an exception at boot
+    // that this harness would have reported as "the viewer blanked" with no clue why.
+    // The harness masking a boot crash is precisely how one shipped before.
+    this.style = {
+      _props: {},
+      setProperty(name, value){ this._props[name] = String(value); },
+      getPropertyValue(name){ return this._props[name] || ''; },
+      removeProperty(name){ const v = this._props[name]; delete this._props[name]; return v || ''; },
+    };
     this._classes = new Set();
     this._className = '';
     this._id = '';
@@ -189,9 +198,13 @@ function buildPage(doc){
   // detail
   const detail = mk('div', { id: 'detail' });
   mk('b', { id: 'detailWell', parent: detail });
-  const chToggle = mk('span', { cls: 'chToggle', parent: detail });
-  mk('button', { cls: 'btn sm chBtn', ds: { ch: 'BF' }, parent: chToggle });
-  mk('button', { cls: 'btn sm chBtn', ds: { ch: 'FL' }, parent: chToggle });
+  // channel is a fader now, not a row of buttons
+  const chRow = mk('span', { id: 'chRow', parent: detail });
+  mk('input', { id: 'chslider', parent: chRow });
+  mk('span', { id: 'chval', parent: chRow });
+  // the two pane splitters (drag targets; the app must boot with or without them)
+  mk('div', { id: 'splitV', cls: 'splitter v' });
+  mk('div', { id: 'splitH', cls: 'splitter h' });
   mk('span', { id: 'frameInfo', parent: detail });
   const stage = mk('div', { id: 'stage', parent: detail });
   stage._rect = { left: 0, top: 0, width: 600, height: 420, right: 600, bottom: 420 };
@@ -478,6 +491,8 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   {
     const st = API.state;
     st.filter.active = false;
+    // The fader modes only apply on the IMAGE tab, which is where the faders are.
+    st.scope = 'image';
     st.arrowMode = 'wells';                              // clicked a well → arrows move wells
     const w0 = st.primary;
     API.arrowNav(1, false);
@@ -491,7 +506,46 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     st.arrowMode = 'rotation';                           // clicked the rotation fader → arrows nudge rotation
     st.rotview = 0; API.arrowNav(1, false);
     ok(typeof st.rotview === 'number' && st.rotview !== 0, 'arrowNav(rotation) changes the rotation view');
-    st.arrowMode = 'wells'; st.rotview = null;
+
+    // ---- and on the WELL tab the arrows ALWAYS move wells ------------------
+    // Touching a fader once used to leave ← → nudging it for the rest of the session, so
+    // you would go back to the Well tab, press →, and step the focus slice instead of
+    // moving to the next well. The tab you are annotating in wins.
+    if (st.manifest.wells.length > 1){
+      for (const stuck of ['z', 'rotation', 'frame']){
+        st.scope = 'well'; st.arrowMode = stuck;         // a fader mode left over from earlier
+        st.primary = st.manifest.wells[0];               // start where there IS somewhere to go
+        API.arrowNav(1, false);
+        ok(st.primary === st.manifest.wells[1],
+           `Well tab: arrows move wells even with arrowMode='${stuck}' left over`);
+      }
+      st.scope = 'plate'; st.arrowMode = 'z';
+      st.primary = st.manifest.wells[0]; API.arrowNav(1, false);
+      ok(st.primary === st.manifest.wells[1], 'Plate tab: arrows move wells too');
+    }
+    st.scope = 'image'; st.arrowMode = 'wells'; st.rotview = null;
+  }
+
+  // ---- resizable panes: clamped, persisted, and never fatal -----------------
+  {
+    const root = doc.documentElement;
+    API.applySplit('leftw', 46);
+    eq(root.style.getPropertyValue('--leftw'), '46.00%', 'a splitter writes the pane width');
+    API.applySplit('leftw', -50);
+    eq(root.style.getPropertyValue('--leftw'), '15.00%', 'dragging past the edge clamps, never collapses a pane');
+    API.applySplit('detailh', 999);
+    eq(root.style.getPropertyValue('--detailh'), '85.00%', '…at both ends, for both splitters');
+    API.applySplit('leftw', 46); API.applySplit('detailh', 52);
+  }
+
+  // ---- channel is a fader ----------------------------------------------------
+  {
+    const st = API.state, sl = doc.getElementById('chslider');
+    API.buildChannelButtons();
+    eq(sl.max, String(st.manifest.channels.length - 1), 'the channel fader spans the plate\'s channels');
+    eq(doc.getElementById('chval').textContent, st.channel, 'the channel fader shows the current channel');
+    eq(doc.getElementById('chRow').hidden, st.manifest.channels.length < 2,
+       'a single-channel plate hides the channel fader instead of showing a dead control');
   }
   // ---- Image tab displays the recorded fader keyframes ----------------------
   {

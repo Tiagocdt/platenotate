@@ -1053,7 +1053,7 @@ function armDwellPrefetch(){
 }
 function renderDetail(){
   $('#detailWell').textContent = state.primary || '—';
-  $$('.chBtn').forEach(b => b.classList.toggle('active', b.dataset.ch === state.channel));
+  updateChannelFader();
   if (state.primary && state.primary !== state._pfWell){
     state._pfWell = state.primary; state._pfStack = null;
     prefetchWell(state.primary);                         // tier 1: the displayed plane
@@ -1137,6 +1137,10 @@ function renderTools(){
 }
 function updateFrameInfo(){
   const tps = curTps(), tp = curTp();
+  const tv = $('#tpval');
+  // the time fader's own readout, in the same "n / total" shape as z — the header keeps
+  // the long form (elapsed minutes, stage, slice) so the fader column stays scannable
+  if (tv) tv.textContent = tp == null ? '—' : `${state.frameIdx + 1} / ${tps.length}`;
   if (tp == null){ $('#frameInfo').textContent = 'no frames'; return; }
   const iv = Number(state.manifest.autofill.timepoint_interval_min) || 0;
   const mins = iv ? ` · +${((tp - 1) * iv)} min` : '';
@@ -1164,9 +1168,9 @@ function updateRangeLive(){
   const tp = curTp(); ph.textContent = tp != null ? `playhead → tp ${tp}` : '';
 }
 function togglePlay(){ state.playing ? stopPlay() : startPlay(); }
-function startPlay(){ if (curTps().length < 2) return; state.playing = true; $('#playBtn').textContent = '❚❚';
+function startPlay(){ if (curTps().length < 2) return; state.playing = true; $('#playBtn').textContent = 'stop';
   state.playTimer = setInterval(() => setFrame(state.frameIdx + 1), 120); }
-function stopPlay(){ state.playing = false; $('#playBtn').textContent = '▶'; clearInterval(state.playTimer);
+function stopPlay(){ state.playing = false; $('#playBtn').textContent = 'play'; clearInterval(state.playTimer);
   syncGridToDetail(); }                                  // catch the thumbnails up to where you paused
 // The detail scrubber drives the miniature grid's timepoint too (so one fader does both). To
 // stay smooth we DON'T repaint 96 thumbnails every playback tick — only when playback is halted
@@ -2008,14 +2012,28 @@ function keyframeStrip(col){
 }
 
 // ------------------------------------------------------------------ channel buttons / options
+// Channel is a fader like z, time and rotation — the same gesture for every axis of the
+// image, instead of one axis being a row of buttons that grows unusably wide on a plate
+// with four or five channels.
 function buildChannelButtons(){
-  const box = $('.chToggle'); box.innerHTML = '';
-  state.manifest.channels.forEach(ch => {
-    const b = elt('button', 'btn sm chBtn' + (ch === state.channel ? ' active' : ''), ch);
-    b.dataset.ch = ch;
-    b.onclick = () => { if (state.channel === ch) return; state.channel = ch; clampFrame(); renderDetail(); };
-    box.appendChild(b);
-  });
+  const row = $('#chRow'), sl = $('#chslider');
+  if (!row || !sl) return;
+  const chans = (state.manifest && state.manifest.channels) || [];
+  row.hidden = chans.length < 2;                 // one channel is not an axis
+  sl.max = String(Math.max(0, chans.length - 1));
+  sl.value = String(Math.max(0, chans.indexOf(state.channel)));
+  sl.oninput = () => {
+    const ch = chans[Number(sl.value)];
+    if (!ch || ch === state.channel) return;
+    state.channel = ch; clampFrame(); renderDetail();
+  };
+  updateChannelFader();
+}
+function updateChannelFader(){
+  const sl = $('#chslider'), v = $('#chval');
+  const chans = (state.manifest && state.manifest.channels) || [];
+  if (sl) sl.value = String(Math.max(0, chans.indexOf(state.channel)));
+  if (v) v.textContent = state.channel || '—';
 }
 function buildGridChannelOptions(){
   const s = $('#gridChannel'); s.innerHTML = '';
@@ -2024,7 +2042,76 @@ function buildGridChannelOptions(){
 }
 
 // ------------------------------------------------------------------ static wiring
+// ---- resizable panes -------------------------------------------------------------
+// Two splitters: grid | detail, and image | annotations. Both write a CSS custom
+// property rather than an inline width on the panes, so a drag is one style write and
+// the flex children resolve themselves. Sizes are remembered per browser; double-click
+// puts a splitter back where it started, because a pane dragged to nothing is the kind
+// of state that looks like a bug rather than a setting.
+const SPLIT_DEFAULTS = { leftw: 46, detailh: 52 };
+
+function applySplit(k, pct){
+  const clamped = Math.max(15, Math.min(85, pct));
+  // Guarded: this runs from wireStatic, and wireStatic runs at boot. An unguarded DOM
+  // call there does not degrade — it blanks the whole viewer. That has happened once
+  // already (a leftover $('#helpBtn').onclick after the button was removed), and a
+  // remembered pane width is not worth an app that will not start.
+  try {
+    document.documentElement.style.setProperty(k === 'leftw' ? '--leftw' : '--detailh',
+                                               clamped.toFixed(2) + '%');
+  } catch (e){}
+  try { localStorage.setItem('pn.split.' + k, String(clamped)); } catch (e){}
+  return clamped;
+}
+
+function restoreSplits(){
+  for (const k of Object.keys(SPLIT_DEFAULTS)){
+    let v = SPLIT_DEFAULTS[k];
+    try { const s = localStorage.getItem('pn.split.' + k); if (s != null && isFinite(+s)) v = +s; } catch (e){}
+    applySplit(k, v);
+  }
+}
+
+function wireSplitters(){
+  const defs = [
+    { el: $('#splitV'), key: 'leftw',   axis: 'x', host: () => $('#app') },
+    { el: $('#splitH'), key: 'detailh', axis: 'y', host: () => $('#right') },
+  ];
+  for (const d of defs){
+    if (!d.el) continue;
+    d.el.addEventListener('pointerdown', ev => {
+      ev.preventDefault();
+      const host = d.host(); if (!host) return;
+      d.el.classList.add('dragging');
+      document.body.classList.add(d.axis === 'x' ? 'resizing-v' : 'resizing-h');
+      // setPointerCapture keeps the drag alive over the image and the iframe-less panes;
+      // without it, moving fast off the 1px line drops the gesture.
+      try { d.el.setPointerCapture(ev.pointerId); } catch (e){}
+      const move = e => {
+        const r = host.getBoundingClientRect();
+        const pct = d.axis === 'x' ? (e.clientX - r.left) / r.width * 100
+                                   : (e.clientY - r.top) / r.height * 100;
+        if (isFinite(pct)) applySplit(d.key, pct);
+      };
+      const up = () => {
+        d.el.classList.remove('dragging');
+        document.body.classList.remove('resizing-v', 'resizing-h');
+        d.el.removeEventListener('pointermove', move);
+        d.el.removeEventListener('pointerup', up);
+        d.el.removeEventListener('pointercancel', up);
+        if (typeof updateRangeBar === 'function') updateRangeBar();   // width changed
+      };
+      d.el.addEventListener('pointermove', move);
+      d.el.addEventListener('pointerup', up);
+      d.el.addEventListener('pointercancel', up);
+    });
+    d.el.addEventListener('dblclick', () => { applySplit(d.key, SPLIT_DEFAULTS[d.key]); updateRangeBar(); });
+  }
+}
+
 function wireStatic(){
+  restoreSplits();
+  wireSplitters();
   $('#plateSelect').onchange = e => { if (state.filter.active) clearFilter(); loadPlate(e.target.value); };
   // The annotator is a SESSION identity: switching it saves any pending edits under the OLD
   // name, remembers the NEW one, and reloads the plate so you see only YOUR annotations.
@@ -2131,7 +2218,13 @@ function wireStatic(){
     } catch (e){ $('#folderStatus').textContent = 'failed: ' + e; }
   });
 
-  $$('.tab').forEach(t => t.onclick = () => { state.scope = t.dataset.scope; renderPanel(); updateRangeBar(); updateFaders(); });
+  $$('.tab').forEach(t => t.onclick = () => {
+    state.scope = t.dataset.scope;
+    // Leaving the Image tab hands the arrows back to well navigation, so a fader you
+    // touched there cannot follow you to the tab where you annotate wells.
+    if (state.scope !== 'image') state.arrowMode = 'wells';
+    renderPanel(); updateRangeBar(); updateFaders();   // renderPanel sets the active tab
+  });
 
   $('#pagePrev').onclick = () => { if (state.page>0){ state.page--; renderGrid(); } };
   $('#pageNext').onclick = () => { state.page++; renderGrid(); };
@@ -2139,8 +2232,7 @@ function wireStatic(){
   $('#gridChannel').onchange = e => { state.gridChannel = e.target.value; renderGrid(); };
   $('#blockInput').onkeydown = e => { if (e.key === 'Enter') applyBlock(e.target.value); };
 
-  $$('.chBtn').forEach(b => b.onclick = () => { state.channel = b.dataset.ch; clampFrame(); renderDetail(); });
-  $('#playBtn').onclick = () => { state.arrowMode = 'frame'; togglePlay(); };       // ← → now step frames
+    $('#playBtn').onclick = () => { state.arrowMode = 'frame'; togglePlay(); };       // ← → now step frames
   const $scrub = $('#scrub');
   $scrub.oninput = e => { stopPlay(); setFrame(Number(e.target.value)); };
   $scrub.addEventListener('pointerdown', () => { state.arrowMode = 'frame'; });   // ← → now step frames
@@ -2267,10 +2359,19 @@ function cycleActive(step){
   let i = names.indexOf(state.activeCol); i = ((i + step) % names.length + names.length) % names.length;
   state.activeCol = names[i]; renderPanel(); renderGridBadges();
 }
-// Arrow keys act on WHATEVER you last clicked: a well thumbnail → move between wells
-// (through the filtered selection when a filter is active); a fader → nudge that fader.
+// What ← → actually do right now.
+//
+// The mode used to be purely "whatever you last clicked", which meant touching the z or
+// rotation fader ONCE left the arrows nudging that fader for the rest of the session —
+// so you would go back to the Well tab, press →, and step the focus slice instead of
+// moving to the next well. The tab you are working in wins: Well and Plate are about
+// choosing wells, so there the arrows move wells, full stop. Only the Image tab, which
+// is where the faders live, keeps the last-touched behaviour.
+function effectiveArrowMode(){
+  return state.scope === 'image' ? state.arrowMode : 'wells';
+}
 function arrowNav(dir, big){
-  switch (state.arrowMode){
+  switch (effectiveArrowMode()){
     case 'z':        arrowZ(dir); break;
     case 'rotation': arrowRot(dir, big); break;
     case 'frame':    stopPlay(); setFrame(state.frameIdx + dir * (big ? 10 : 1)); break;
@@ -2447,6 +2548,7 @@ const AnnotatorAPI = {
   // convenience for the host UI / tests
   activateImageTool, deactivateImageTool, get activeToolCol(){ return activeToolCol; },
   arrowNav, movePrimary, renderGridBadges, exportWells,          // navigation + export (tested)
+  applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
 };
 window.AnnotatorAPI = AnnotatorAPI;
 wireStageTools();

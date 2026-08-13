@@ -4,6 +4,48 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.7.0] — 2026-08-13
+
+### The arrows move wells again when you are annotating wells
+
+Touching the z or rotation fader once left `← →` nudging that fader for the rest of the
+session — so you would go back to the Well tab, press `→` expecting the next well, and
+step the focus slice instead. **The tab you are working in now wins**: Well and Plate are
+about choosing wells, so there the arrows move wells, full stop. Only the Image tab, where
+the faders live, keeps the last-touched behaviour.
+
+### The panes resize
+
+Both splits are draggable now — the grid against the detail view, and the image against
+the annotation panel below it. Drag the hairline between them; **double-click puts it
+back**. Sizes are remembered.
+
+### A quieter interface
+
+The register was drifting towards generic web UI. Corrected:
+
+- **Nothing is round.** Every capsule (`border-radius:999px`) is gone — suggestions,
+  chips, stamps, plate chips, the version tag. Radii are 0–3px. A rounded rectangle is a
+  control; a pill is a badge pretending to be one.
+- **No emoji in the chrome.** `📂 Open`, `🔎 Filter`, `⤓ TIF`, `↶ Undo`, `⚙` and the rest
+  are words now.
+- **No motion for attention.** The pulsing jobs dot is steady: a job is either running or
+  it is not.
+- **The four axes of a frame are one control type.** Time, z, rotation **and channel** are
+  now identical faders — a fixed-width key, a 2px track, a thin bar marker, and the value
+  right-aligned in tabular figures, so they line up into a column you can read at a
+  glance. Channel was a row of buttons that would have grown unusable on a plate with
+  five channels; it is a fader like everything else, and hides itself on a
+  single-channel plate rather than showing a dead control.
+
+### Fixed — the test harness was masking boot crashes again
+
+The fake DOM's `style` was a bare `{}` with no `setProperty`, so the first thing the
+resizable panes did at boot threw, and the harness reported it only as "the viewer
+blanked". It now implements a real `CSSStyleDeclaration`. A layout preference also can no
+longer break boot — the same lesson as the `#helpBtn` crash, which blanked the app for
+exactly this reason.
+
 ## [1.6.1] — 2026-08-11
 
 ### Fixed — on Windows the app could not tell whether it was allowed to write
