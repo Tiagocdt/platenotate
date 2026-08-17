@@ -166,7 +166,7 @@ and a `screening_<plate>.json` (schema v3) — pick the formats in Settings.
 | `version.py`, `VERSION` | version + the fast-forward self-update |
 | `index.html`, `static/` | the GUI (vanilla JS, no build) — `rot_tool.js` / `measure_tool.js` are plugins |
 | `packaging/` | PyInstaller recipe + the vendored engine modules a standalone clone needs |
-| `assets/` | the logo, and the `.icns` / `.ico` app icons built from it |
+| `assets/` | the logo, the `.icns` / `.ico` app icons built from it, and `source/` — the Illustrator original everything is generated from |
 | `.github/workflows/` | builds + smoke-tests the app on all three platforms, and publishes the release |
 | `tests/` | `js_harness.mjs` (headless GUI), `compose_test.py` (render engine), `db_roundtrip_test.py` |
 | `docs/` | desktop packaging, the image-tool plugin API, and design history |
