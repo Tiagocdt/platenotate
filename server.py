@@ -661,7 +661,8 @@ _cache_writes = [0]
 # hit/miss/eviction counters, so a cache that is holding nothing useful can be SEEN
 # rather than merely felt as "it got slow again". Reset when the process restarts.
 _cache_stats = {"hit_ram": 0, "hit_disk": 0, "miss": 0,
-                "evicted": 0, "evicted_bytes": 0, "evictions": 0}
+                "evicted": 0, "evicted_bytes": 0, "evictions": 0,
+                "prefetch_skipped": 0}
 _stats_lock = threading.Lock()
 
 
@@ -901,9 +902,54 @@ def guarded_read(make, timeout: float = _IO_TIMEOUT_S):
 # that is already the bottleneck — which is how a slow mount took the whole app down.
 # Now: one pool, a fixed ceiling, and a generation counter that makes queued work for
 # a well you have already navigated away from evaporate instead of running.
-_PREFETCH_WORKERS = 12
+#
+# TWO THINGS MEASURED ON A 4-CPU CLUSTER ALLOCATION, both fixed here:
+#
+#  1. ONE touch of the z fader queued **2,425 encodes in 45 s, and was still going** —
+#     the stack pass asked for every z of every timepoint within ±60 of where you are,
+#     on a 700-timepoint well. Over a whole session: 55,267 frames served, 50,354 of
+#     them misses. Reading a TIF and encoding a JPEG is CPU work, so that is minutes of
+#     compute conjured up by nudging a slider.
+#  2. Twelve workers is not a ceiling on a 4-core box, it is a 3x oversubscription. JPEG
+#     encoding does not go faster than the cores you have; it only makes everything else
+#     go slower, and the frame the user is actually waiting for is one of the things it
+#     slows down.
+#
+# So: size the pool to the machine, spend a BUDGET rather than a radius, and always
+# yield to a real request. Guessing ahead is only ever worth it when it is free.
+_PREFETCH_WORKERS = max(2, min(12, (os.cpu_count() or 4) - 1))
+_PREFETCH_BUDGET = 200          # frames per request, taken outward from where you are
 _PREFETCH = {"gen": 0, "pool": None}
 _PREFETCH_LOCK = threading.Lock()
+
+# how many real requests are being served right now; prefetch stands aside for them
+_INFLIGHT = {"n": 0}
+_INFLIGHT_LOCK = threading.Lock()
+
+
+class _serving:
+    """Mark a real request in flight, so speculative work gets out of its way."""
+
+    def __enter__(self):
+        with _INFLIGHT_LOCK:
+            _INFLIGHT["n"] += 1
+
+    def __exit__(self, *exc):
+        with _INFLIGHT_LOCK:
+            _INFLIGHT["n"] -= 1
+
+
+def _yield_to_serving(max_wait_s: float = 2.0) -> bool:
+    """Wait while someone is waiting on a frame. False if we waited long enough that this
+    speculative item should just be dropped — the user has moved on, and a queue of
+    guesses is exactly what made the app feel frozen."""
+    waited = 0.0
+    while _INFLIGHT["n"] > 0:
+        if waited >= max_wait_s:
+            return False
+        time.sleep(0.05)
+        waited += 0.05
+    return True
 
 
 def _prefetch_pool():
@@ -991,11 +1037,19 @@ def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
                     if fp is not None:
                         jobs.append(fp)
 
+    # Spend a budget, not a radius. `jobs` is already ordered outward from the frame you
+    # are on, so the first N are the ones you are most likely to want next; the tail was
+    # thousands of frames of a well you will probably never scroll to.
+    dropped = max(0, len(jobs) - _PREFETCH_BUDGET)
+    jobs = jobs[:_PREFETCH_BUDGET]
+
     def one(fp):
         if gen != _PREFETCH["gen"]:                     # a newer well was selected
             return
         if io_stalled():                                # the share is already in trouble:
             return                                      # do not queue more work onto it
+        if not _yield_to_serving():                     # someone is waiting on a real
+            return                                      # frame — they outrank a guess
         try:
             _cached_png(fp, size)          # warms disk; bytes discarded
         except OSError:                                 # share vanished mid-read: the
@@ -1008,6 +1062,8 @@ def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
             pool.submit(one, fp)
         except RuntimeError:                            # pool shutting down
             break
+    if dropped:
+        _bump("prefetch_skipped", dropped)
 
 
 # ------------------------------------------------------------------ plate cache
@@ -1457,7 +1513,8 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return _PNG_CACHE.get_or(key, lambda: _cached_png(fp, size))
 
-        got, why = guarded_read(read)
+        with _serving():                    # prefetch stands aside while this is pending
+            got, why = guarded_read(read)
         if why:
             # 503, not a hang. The browser frees the connection and the UI keeps working;
             # Retry-After stops it hammering a share that is already in trouble.

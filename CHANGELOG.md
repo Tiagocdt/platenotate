@@ -4,6 +4,43 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.7.2] — 2026-08-17
+
+### Fixed — nudging the focus slider queued thousands of encodes
+
+Reported as "changing the focus slice loads forever and worst case freezes completely".
+Measured on a 4-CPU cluster allocation, this is what one touch of the z fader did:
+
+```
+before:  2,425 encodes queued in 45 s — and still going
+after:       0
+```
+
+Over one session: **55,267 frames served, 50,354 of them misses** — nearly all of it
+speculative. The stack prefetch asked for every z of every timepoint within ±60 of where
+you are, which on a 700-timepoint well is thousands of TIF reads and JPEG encodes; and
+the pool was a flat 12 workers, which on 4 cores is a 3× oversubscription that cannot go
+faster and can only make everything else slower. The frame you were actually waiting for
+was queued behind all of it.
+
+Three changes, each aimed at one of those:
+
+- **The pool is sized to the machine** — `cpu_count - 1`, capped at 12 — because JPEG
+  encoding does not go faster than the cores you have.
+- **Prefetch spends a budget, not a radius**: 200 frames, taken outward from where you
+  are. The list was already ordered outward; the tail was a well you will probably never
+  scroll to.
+- **Prefetch yields to real requests.** While anyone is waiting on a frame, speculative
+  work stands aside, and an item that waits too long is dropped rather than queued —
+  guessing ahead is only worth it when it is free.
+
+Measured after: a frame served **during** a prefetch storm comes back in ~200 ms instead
+of not at all. `/api/cache` reports `prefetch_skipped` so the saving is visible.
+
+This was never a cache problem — the cache had 20 GB free, 2.3 TB of disk, and zero
+evictions. It was the app asking a 4-core box to do tens of thousands of encodes nobody
+had asked for.
+
 ## [1.7.1] — 2026-08-13
 
 ### Fixed — closing the window did not close the app
