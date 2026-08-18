@@ -493,39 +493,43 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   {
     const st = API.state;
     st.filter.active = false;
-    // The fader modes only apply on the IMAGE tab, which is where the faders are.
-    st.scope = 'image';
-    st.arrowMode = 'wells';                              // clicked a well → arrows move wells
+
+    // The arrows drive WHATEVER YOU LAST TOUCHED. Touch the grid and they move wells;
+    // touch the detail view and they drive the faders, with Up/Down choosing which one
+    // and Left/Right moving it. Space is always play/pause — it used to be swallowed
+    // entirely once a fader had focus, because the key handler bailed on every <input>
+    // and a range slider is an input. That is why Play had to be clicked first.
+    st.arrowMode = 'wells';
     const w0 = st.primary;
     API.arrowNav(1, false);
-    ok(st.manifest.wells.length <= 1 || st.primary !== w0, 'arrowNav(wells) moves the primary well');
-    st.arrowMode = 'frame';                              // clicked the scrubber → arrows step frames
-    const pw = st.primary; API.arrowNav(1, false);
-    eq(st.primary, pw, 'arrowNav(frame) leaves the well unchanged');
-    st.arrowMode = 'z';                                  // clicked the z fader → arrows nudge focus
-    const pw2 = st.primary; API.arrowNav(1, false);
-    eq(st.primary, pw2, 'arrowNav(z) leaves the well unchanged');
-    st.arrowMode = 'rotation';                           // clicked the rotation fader → arrows nudge rotation
-    st.rotview = 0; API.arrowNav(1, false);
-    ok(typeof st.rotview === 'number' && st.rotview !== 0, 'arrowNav(rotation) changes the rotation view');
+    ok(st.manifest.wells.length <= 1 || st.primary !== w0, 'grid mode: arrows move wells');
 
-    // ---- and on the WELL tab the arrows ALWAYS move wells ------------------
-    // Touching a fader once used to leave ← → nudging it for the rest of the session, so
-    // you would go back to the Well tab, press →, and step the focus slice instead of
-    // moving to the next well. The tab you are annotating in wins.
-    if (st.manifest.wells.length > 1){
-      for (const stuck of ['z', 'rotation', 'frame']){
-        st.scope = 'well'; st.arrowMode = stuck;         // a fader mode left over from earlier
-        st.primary = st.manifest.wells[0];               // start where there IS somewhere to go
-        API.arrowNav(1, false);
-        ok(st.primary === st.manifest.wells[1],
-           `Well tab: arrows move wells even with arrowMode='${stuck}' left over`);
-      }
-      st.scope = 'plate'; st.arrowMode = 'z';
-      st.primary = st.manifest.wells[0]; API.arrowNav(1, false);
-      ok(st.primary === st.manifest.wells[1], 'Plate tab: arrows move wells too');
-    }
-    st.scope = 'image'; st.arrowMode = 'wells'; st.rotview = null;
+    st.arrowMode = 'faders'; st.fader = 'time';
+    const held = st.primary, f0 = st.frameIdx;
+    API.arrowNav(1, false);
+    eq(st.primary, held, 'fader mode: arrows leave the well alone');
+    ok(st.frameIdx !== f0, 'fader mode: the time fader moves');
+
+    // Up/Down walk the faders that this plate actually has
+    const av = API.availableFaders();
+    ok(av[0] === 'time' && av.includes('rotation'), `the fader list is built from the plate (${av.join(', ')})`);
+    ok(!av.includes('channel') || st.manifest.channels.length > 1,
+       'channel is only a fader when there is more than one channel');
+    st.fader = av[0];
+    API.cycleFader(1);
+    eq(API.currentFader(), av[1 % av.length], 'Down moves to the next fader');
+    API.cycleFader(-1);
+    eq(API.currentFader(), av[0], 'Up moves back');
+    for (let i = 0; i < av.length; i++) API.cycleFader(1);
+    eq(API.currentFader(), av[0], 'and it wraps rather than stopping at the end');
+
+    // each fader actually moves when selected
+    st.fader = 'rotation'; st.rotview = 0;
+    API.arrowNav(1, false);
+    ok(typeof st.rotview === 'number' && st.rotview !== 0, 'rotation selected: arrows turn the image');
+    st.rotview = null;
+
+    st.arrowMode = 'wells'; st.fader = 'time';
   }
 
   // ---- the filmstrip: scrubbing must not be one round-trip per position -----

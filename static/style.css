@@ -439,3 +439,10 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;font-size:12px;f
 .filmbar{position:absolute;left:0;bottom:1px;height:2px;background:var(--sel);opacity:.55;
   pointer-events:none;z-index:0;transition:width .25s linear}
 .filmbar[hidden]{display:none}
+
+/* the fader the arrow keys are driving — up/down move this marker, left/right move the
+   fader itself. A keyboard that moves something invisible is worse than no keyboard. */
+.fader.sel .fkey{color:var(--accent)}
+.fader.sel input[type=range]::-webkit-slider-thumb{background:var(--accent)}
+.fader.sel input[type=range]::-moz-range-thumb{background:var(--accent)}
+.fader.sel .fval{color:var(--fg)}

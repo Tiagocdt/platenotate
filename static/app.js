@@ -75,11 +75,12 @@ const fmtVal = v => Array.isArray(v) ? `[${v[0]}–${v[1]}]` : String(v);
 const state = {
   cfg: null, plateDir: '', manifest: null, payload: null,
   me: '',                          // the current annotator (session identity; see only your own)
-  arrowMode: 'wells',              // what ← → control: 'wells' | 'z' | 'rotation' | 'frame'
+  arrowMode: 'wells',              // what the arrows drive: 'wells' | 'faders'
+  fader: 'time',                   // which fader, when they drive the faders
   sel: new Set(), primary: null,
   channel: 'BF', frameIdx: 0, playing: false, playTimer: null, zview: null, rotview: null, zrec: false, rotrec: false,
   scope: 'well', activeCol: null, imageMode: true,
-  gridChannel: 'BF', gridFrac: 0.5, page: 0, perPage: 96,
+ gridFrac: 0.5, page: 0, perPage: 96,
   undo: [], redo: [], dirty: false, saveTimer: null,
   cells: new Map(), rangeDrag: null,
   filter: { active: false, constraints: [], data: null, results: [] },
@@ -171,7 +172,7 @@ async function loadPlate(dir){
     seedScopes();
     // pick channel + primary — the detection channel (bf_channel) is the default view
     state.channel = man.detect_channel || (man.channels.includes('BF') ? 'BF' : man.channels[0]);
-    state.gridChannel = state.channel;
+    state.channel = state.channel;
     state.zview = null; state.rotview = null;   // fresh plate: faders follow the annotated keyframes
     state.page = 0;
     state.primary = man.wells[0] || null;
@@ -181,7 +182,6 @@ async function loadPlate(dir){
     state.undo = []; state.redo = []; state.dirty = false;
     $('#annotator').value = state.me || state.payload.annotator || '';
     buildChannelButtons();
-    buildGridChannelOptions();
     renderAll();
     setStatus('loaded ' + man.plate, '');
   } catch (e){
@@ -427,7 +427,7 @@ function renderGrid(){
   g.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   for (const w of wells){
     const cell = elt('div', 'cell'); cell.dataset.well = w;
-    const rep = repFrame(w, state.gridChannel);
+    const rep = repFrame(w, state.channel);
     const img = elt('img'); img.loading = 'lazy'; img.draggable = false;
     if (rep) img.src = frameURL(w, rep.ch, rep.tp, 130);
     cell.appendChild(img);
@@ -1024,7 +1024,7 @@ function renderFilterGrid(){
   for (const r of res){
     const cell = elt('div', 'cell'); cell.dataset.well = r.well; cell.dataset.plate = r.plate;
     const img = elt('img'); img.loading = 'lazy'; img.draggable = false;
-    img.src = frameURLd(r.plate, r.well, state.gridChannel, filterTp(r), 130);
+    img.src = frameURLd(r.plate, r.well, state.channel, filterTp(r), 130);
     cell.appendChild(img);
     cell.appendChild(Object.assign(elt('span','plate-lab'), { textContent: `${r.short} ${r.well}` }));
     cell.appendChild(Object.assign(elt('span','nann'), { textContent: r.nann }));
@@ -1325,8 +1325,8 @@ function refreshGridThumbs(){
     const w = cell.dataset.well;
     if (state.filter.active){
       const r = state.filter.results.find(x => x.plate === cell.dataset.plate && x.well === w);
-      if (r) img.src = frameURLd(r.plate, r.well, state.gridChannel, filterTp(r), 130);
-    } else { const rep = repFrame(w, state.gridChannel); if (rep) img.src = frameURL(w, rep.ch, rep.tp, 130); }
+      if (r) img.src = frameURLd(r.plate, r.well, state.channel, filterTp(r), 130);
+    } else { const rep = repFrame(w, state.channel); if (rep) img.src = frameURL(w, rep.ch, rep.tp, 130); }
   }
 }
 
@@ -2164,6 +2164,7 @@ function buildChannelButtons(){
   row.hidden = chans.length < 2;                 // one channel is not an axis
   sl.max = String(Math.max(0, chans.length - 1));
   sl.value = String(Math.max(0, chans.indexOf(state.channel)));
+  sl.addEventListener('pointerdown', () => { state.arrowMode='faders'; state.fader='channel'; updateFaderSel(); });
   sl.oninput = () => {
     const ch = chans[Number(sl.value)];
     if (!ch || ch === state.channel) return;
@@ -2176,11 +2177,6 @@ function updateChannelFader(){
   const chans = (state.manifest && state.manifest.channels) || [];
   if (sl) sl.value = String(Math.max(0, chans.indexOf(state.channel)));
   if (v) v.textContent = state.channel || '—';
-}
-function buildGridChannelOptions(){
-  const s = $('#gridChannel'); s.innerHTML = '';
-  state.manifest.channels.forEach(ch => { const o = elt('option'); o.value = ch; o.textContent = ch; s.appendChild(o); });
-  s.value = state.gridChannel;
 }
 
 // ------------------------------------------------------------------ static wiring
@@ -2360,28 +2356,31 @@ function wireStatic(){
     } catch (e){ $('#folderStatus').textContent = 'failed: ' + e; }
   });
 
+  // Touching the detail view gives the arrows to the faders; touching the grid gives
+  // them back to well navigation. That is the "whatever you last touched" rule, restored.
+  { const d = $('#detail'); if (d) d.addEventListener('pointerdown', () => {
+      state.arrowMode = 'faders'; updateFaderSel(); }); }
+  { const g = $('#gridWrap'); if (g) g.addEventListener('pointerdown', () => {
+      state.arrowMode = 'wells'; updateFaderSel(); }); }
+
   $$('.tab').forEach(t => t.onclick = () => {
     state.scope = t.dataset.scope;
-    // Leaving the Image tab hands the arrows back to well navigation, so a fader you
-    // touched there cannot follow you to the tab where you annotate wells.
-    if (state.scope !== 'image') state.arrowMode = 'wells';
     renderPanel(); updateRangeBar(); updateFaders();   // renderPanel sets the active tab
   });
 
   $('#pagePrev').onclick = () => { if (state.page>0){ state.page--; renderGrid(); } };
   $('#pageNext').onclick = () => { state.page++; renderGrid(); };
   $('#perPage').onchange = e => { state.perPage = Number(e.target.value); state.page = 0; renderGrid(); };
-  $('#gridChannel').onchange = e => { state.gridChannel = e.target.value; renderGrid(); };
   $('#blockInput').onkeydown = e => { if (e.key === 'Enter') applyBlock(e.target.value); };
 
-    $('#playBtn').onclick = () => { state.arrowMode = 'frame'; togglePlay(); };       // ← → now step frames
+    $('#playBtn').onclick = () => { state.arrowMode='faders'; state.fader='time'; updateFaderSel(); togglePlay(); };
   const $scrub = $('#scrub');
   $scrub.oninput = e => { stopPlay(); setFrame(Number(e.target.value)); };
-  $scrub.addEventListener('pointerdown', () => { state.arrowMode = 'frame'; });   // ← → now step frames
+  $scrub.addEventListener('pointerdown', () => { state.arrowMode='faders'; state.fader='time'; updateFaderSel(); });
   $scrub.onchange = () => { if (!state.playing) syncGridToDetail(); };            // release → move all thumbnails here
   { const zsl = $('#zslider'); if (zsl){
       zsl.addEventListener('pointerdown', () => {
-        state.arrowMode = 'z';                                                     // ← → now nudge focus
+        state.arrowMode = 'faders'; state.fader = 'z'; updateFaderSel();
         prefetchStack();          // reaching for focus = the z-slices are about to be needed
       });
       // drag = live preview (look). Only the RELEASE re-buffers: re-filling on every
@@ -2398,7 +2397,7 @@ function wireStatic(){
       if (state.zrec) prefetchStack();     // recording focus keyframes: warm the stack now
   }; }
   { const rsl = $('#rotslider'); if (rsl){
-      rsl.addEventListener('pointerdown', () => { state.arrowMode = 'rotation'; });  // ← → now nudge rotation
+      rsl.addEventListener('pointerdown', () => { state.arrowMode='faders'; state.fader='rotation'; updateFaderSel(); });
       rsl.oninput = e => { state.rotview = Number(e.target.value); updateBigImg(); updateRotslider(); }; // drag = live preview (look)
       rsl.onchange = e => { if (state.rotrec) commitRotation(Number(e.target.value)); };                 // release = record ONLY if on
   } }
@@ -2473,7 +2472,17 @@ function wireRangeHandles(){
 // ------------------------------------------------------------------ keyboard
 function wireKeys(){
   document.addEventListener('keydown', e => {
-    if (e.target.matches('input, select, textarea')){ if (e.key === 'Escape') e.target.blur(); return; }
+    // A range slider is a control, not a text field. Bailing on every <input> meant that
+    // after touching a fader the browser owned the keyboard: space did nothing and the
+    // arrows nudged the native slider. That is why Play had to be clicked first to "wake
+    // up" the keys. Only text entry gets to keep them.
+    const tgt = e.target, ttype = (tgt && tgt.type) || '';
+    const typing = tgt && tgt.matches('input, select, textarea') && ttype !== 'range';
+    if (typing){ if (e.key === 'Escape') tgt.blur(); return; }
+    if (ttype === 'range' && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)){
+      e.preventDefault();                 // we drive the faders, not the browser
+      if (tgt.blur) tgt.blur();
+    }
     if ($('#help').hidden === false && e.key === 'Escape'){ $('#help').hidden = true; return; }
     if (!state.plateDir) return;                        // no plate loaded yet → ignore shortcuts
     const k = e.key;
@@ -2489,8 +2498,12 @@ function wireKeys(){
         state.channel = c[(i+1)%c.length]; clampFrame(); renderDetail(); break; }
       case 'ArrowLeft':  arrowNav(-1, false); e.preventDefault(); break;
       case 'ArrowRight': arrowNav(1, false);  e.preventDefault(); break;
-      case 'ArrowUp':    arrowNav(-1, true);  e.preventDefault(); break;
-      case 'ArrowDown':  arrowNav(1, true);   e.preventDefault(); break;
+      case 'ArrowUp':
+        if (effectiveArrowMode() === 'faders') cycleFader(-1); else arrowNav(-1, true);
+        e.preventDefault(); break;
+      case 'ArrowDown':
+        if (effectiveArrowMode() === 'faders') cycleFader(1);  else arrowNav(1, true);
+        e.preventDefault(); break;
       case 'Backspace': if (state.scope==='well' && state.activeCol) doAssign('well', state.activeCol, null); e.preventDefault(); break;
       case 'z': if (e.metaKey||e.ctrlKey){ e.shiftKey?redo():undo(); } else undo(); break;
       case 'Z': redo(); break;
@@ -2515,15 +2528,51 @@ function cycleActive(step){
 // moving to the next well. The tab you are working in wins: Well and Plate are about
 // choosing wells, so there the arrows move wells, full stop. Only the Image tab, which
 // is where the faders live, keeps the last-touched behaviour.
-function effectiveArrowMode(){
-  return state.scope === 'image' ? state.arrowMode : 'wells';
+// What the arrow keys drive is whatever you last touched — the grid, or the detail view.
+// Up/Down choose WHICH fader; Left/Right move it. Space is always play/pause.
+const FADER_ORDER = ['time', 'channel', 'z', 'rotation'];
+
+function availableFaders(){
+  const out = ['time'];
+  const chans = (state.manifest && state.manifest.channels) || [];
+  if (chans.length > 1) out.push('channel');
+  if (channelHasZ(state.channel)) out.push('z');
+  out.push('rotation');
+  return out;
 }
+function currentFader(){
+  const av = availableFaders();
+  return av.includes(state.fader) ? state.fader : av[0];
+}
+function cycleFader(dir){
+  const av = availableFaders();
+  const i = av.indexOf(currentFader());
+  state.fader = av[((i + dir) % av.length + av.length) % av.length];
+  state.arrowMode = 'faders';
+  updateFaderSel();
+}
+// the selected fader is marked, because a keyboard that moves something invisible is
+// worse than no keyboard at all
+function updateFaderSel(){
+  const map = { time: '#scrubrow', channel: '#chRow', z: '#zrow', rotation: '#rotrow' };
+  const on = state.arrowMode === 'faders' ? currentFader() : null;
+  for (const [name, sel] of Object.entries(map)){
+    const el = $(sel);
+    if (el) el.classList.toggle('sel', name === on);
+  }
+}
+function effectiveArrowMode(){ return state.arrowMode === 'faders' ? 'faders' : 'wells'; }
 function arrowNav(dir, big){
-  switch (effectiveArrowMode()){
+  if (effectiveArrowMode() !== 'faders') return movePrimary(big ? dir * 12 : dir);
+  switch (currentFader()){
     case 'z':        arrowZ(dir); break;
     case 'rotation': arrowRot(dir, big); break;
-    case 'frame':    stopPlay(); setFrame(state.frameIdx + dir * (big ? 10 : 1)); break;
-    default:         movePrimary(big ? dir * 12 : dir);   // 'wells'
+    case 'channel': { const c = (state.manifest && state.manifest.channels) || [];
+      if (c.length < 2) break;
+      const i = c.indexOf(state.channel);
+      state.channel = c[((i + dir) % c.length + c.length) % c.length];
+      clampFrame(); renderDetail(); renderGrid(); break; }
+    default:         stopPlay(); setFrame(state.frameIdx + dir * (big ? 10 : 1));   // time
   }
 }
 function arrowZ(dir){
@@ -2698,6 +2747,7 @@ const AnnotatorAPI = {
   arrowNav, movePrimary, renderGridBadges, exportWells,          // navigation + export (tested)
   applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
   jget, netFetch, backendLost,                                   // network + its failure banner
+  availableFaders, currentFader, cycleFader, updateFaderSel,     // the keyboard's fader model
   FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp, curZ, // the in-browser filmstrip
 };
 window.AnnotatorAPI = AnnotatorAPI;

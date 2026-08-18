@@ -66,10 +66,6 @@
           <option>96</option><option>48</option><option>24</option><option>12</option>
         </select>
       </label>
-      <span class="sep"></span>
-      <label class="mini">grid
-        <select id="gridChannel"><option>BF</option><option>FL</option></select>
-      </label>
       <span class="dotlegend muted" title="The dot at each thumbnail's top-right corner">
         <i class="dot stage"></i>Iwamatsu stage&nbsp;&nbsp;<i class="dot other"></i>other image annotation
       </span>
@@ -92,14 +88,6 @@
     <div id="detail">
       <div class="detailhead">
         <b id="detailWell">—</b>
-        <!-- channel: a fader like z / rotation / time, so every axis of the image is
-             driven the same way. Hidden when the plate has only one channel. -->
-        <span id="chRow" class="fader chfader" hidden>
-          <span class="fkey">ch</span>
-          <input id="chslider" type="range" min="0" max="0" value="0" step="1"
-                 title="Channel (c cycles)">
-          <span id="chval" class="fval">—</span>
-        </span>
         <span class="grow"></span>
         <span id="frameInfo" class="muted">—</span>
       </div>
@@ -121,6 +109,12 @@
             <i id="filmBar" class="filmbar" hidden></i>
           </div>
           <span id="tpval" class="fval">—</span>
+        </div>
+        <div id="chRow" class="fader" hidden>
+          <span class="fkey">ch</span>
+          <input id="chslider" type="range" min="0" max="0" value="0" step="1"
+                 title="Channel (c cycles). The grid follows this too.">
+          <span id="chval" class="fval">—</span>
         </div>
         <div id="zrow" class="fader" hidden>
           <button id="zrec" class="fkey fkey-btn reclab" title="z-slice. Drag to look through the stack. Switch on to record the slice as a focus keyframe at each timepoint.">z</button>
