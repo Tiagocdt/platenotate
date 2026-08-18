@@ -537,11 +537,23 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     API.filmClear();
     const tp = API.curTp();
     ok(API.filmFor(tp) === null, 'an unbuffered frame falls back to the network');
-    API.FILM.frames.set(tp, 'blob:fake-buffered-frame');
+    const zNow = API.curZ(tp);
+    API.FILM.frames.set(tp, { url: 'blob:fake-buffered-frame', z: zNow,
+                              well: st.primary, ch: st.channel });
     eq(API.filmFor(tp), 'blob:fake-buffered-frame', 'a buffered frame is served from memory');
     API.updateBigImg();
     eq(doc.getElementById('bigImg').src, 'blob:fake-buffered-frame',
        'the viewer uses the buffered frame, with no request at all');
+    // THE z-FADER BUG: a frame buffered at one slice must never be shown for another.
+    // Keying the strip on the view instead meant moving the z fader changed nothing on
+    // screen, because the old slice's frames were still being handed back.
+    const zSaved = st.zview;
+    st.zview = (zNow == null ? 1 : zNow) + 1;
+    ok(API.filmFor(tp) === null, 'a frame buffered at another z is refused, not shown');
+    API.updateBigImg();
+    ok(/[?&]z=/.test(doc.getElementById('bigImg').src),
+       'and the viewer fetches the slice you actually asked for');
+    st.zview = zSaved;
     API.filmClear();
     ok(API.filmFor(tp) === null && API.FILM.bytes === 0,
        'leaving the well drops its filmstrip (and its memory)');

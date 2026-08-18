@@ -288,12 +288,21 @@ function filmKey(){
 }
 
 function filmClear(){
-  for (const u of FILM.frames.values()) { try { URL.revokeObjectURL(u); } catch (e){} }
+  for (const e of FILM.frames.values()) { try { URL.revokeObjectURL(e.url); } catch (x){} }
   FILM.frames.clear(); FILM.bytes = 0; FILM.done = 0; FILM.total = 0;
   FILM.gen++;
 }
 
-function filmFor(tp){ return FILM.frames.get(tp) || null; }
+// Each buffered frame remembers WHICH z it was fetched at, and is only reused if that is
+// still the z this timepoint should show. Keying the whole strip on the view instead was
+// the z-fader bug: moving the fader changed nothing on screen, because the strip was
+// still handing back the previous slice's frames.
+function filmFor(tp){
+  const e = FILM.frames.get(tp);
+  if (!e) return null;
+  if (e.well !== state.primary || e.ch !== state.channel) return null;
+  return e.z === curZ(tp) ? e.url : null;
+}
 
 // Fill outward from the frame you are on, so the frames you are most likely to scrub to
 // next arrive first. Cancels itself the moment the well, channel or focus track changes.
@@ -310,6 +319,7 @@ async function fillFilm(){
     if (d && here - d >= 0) order.push(tps[here - d]);
   }
   FILM.total = order.length;
+  const zAt = new Map(order.map(tp => [tp, curZ(tp)]));   // the z each frame is fetched AT
   let next = 0;
   const worker = async () => {
     while (next < order.length){
@@ -317,11 +327,12 @@ async function fillFilm(){
       const tp = order[next++];
       if (FILM.frames.has(tp)) { FILM.done++; continue; }
       try {
-        const r = await fetch(frameURL(state.primary, state.channel, tp, 600, curZ(tp)));
+        const r = await fetch(frameURL(state.primary, state.channel, tp, 600, zAt.get(tp)));
         if (!r.ok || gen !== FILM.gen) { FILM.done++; continue; }
         const b = await r.blob();
         if (gen !== FILM.gen) return;
-        FILM.frames.set(tp, URL.createObjectURL(b));
+        FILM.frames.set(tp, { url: URL.createObjectURL(b), z: zAt.get(tp),
+                              well: state.primary, ch: state.channel });
         FILM.bytes += b.size; FILM.done++;
         if (FILM.bytes > FILM.cap) filmEvict(tp);
         if (tp === curTp()) updateBigImg();      // the one you are looking at just landed
@@ -339,8 +350,8 @@ function filmEvict(around){
   const far = [...FILM.frames.keys()].sort((a, b) => Math.abs(b - around) - Math.abs(a - around));
   while (FILM.bytes > FILM.cap * 0.8 && far.length){
     const tp = far.shift();
-    const u = FILM.frames.get(tp);
-    if (u){ try { URL.revokeObjectURL(u); } catch (e){} FILM.frames.delete(tp); FILM.bytes -= 60000; }
+    const e = FILM.frames.get(tp);
+    if (e){ try { URL.revokeObjectURL(e.url); } catch (x){} FILM.frames.delete(tp); FILM.bytes -= 60000; }
   }
   if (FILM.bytes < 0) FILM.bytes = 0;
 }
@@ -1939,6 +1950,9 @@ function setImageKeyframe(col, value){
 // Commit the current z as the 'slice' focus keyframe at this timepoint — this is how
 // the z-slider annotates focus (always SET, never toggle-off). canonicalizeKf drops it
 // if it's redundant with the held value, so it never creates a needless boundary.
+// Writing a focus keyframe changes which z the timepoints after it resolve to, so the
+// buffered strip for those frames is now for the wrong slice. filmFor() already refuses
+// them one by one; this refills them.
 function commitSlice(z){
   const well = state.primary, tp = curTp();
   if (well == null || tp == null || !Number.isFinite(z)) return;
@@ -1952,6 +1966,7 @@ function commitSlice(z){
   }, { only: ['panel', 'badges'] });
   state.zview = null;                            // now follow the committed keyframe
   updateBigImg(); updateFrameInfo();
+  fillFilm();          // the focus track moved: re-buffer at the new slices
 }
 
 // Commit the current angle as the 'rotation' keyframe at this timepoint (the rotation
@@ -2369,8 +2384,14 @@ function wireStatic(){
         state.arrowMode = 'z';                                                     // ← → now nudge focus
         prefetchStack();          // reaching for focus = the z-slices are about to be needed
       });
-      zsl.oninput = e => { state.zview = Number(e.target.value); updateBigImg(); updateFrameInfo(); };  // drag = live preview (look)
-      zsl.onchange = e => { if (state.zrec) commitSlice(Number(e.target.value)); };                     // release = record ONLY if on
+      // drag = live preview (look). Only the RELEASE re-buffers: re-filling on every
+      // pixel of the drag would cancel and restart the strip continuously and fetch
+      // nothing to completion, which is what made the z fader feel broken.
+      zsl.oninput = e => { state.zview = Number(e.target.value); updateBigImg(); updateFrameInfo(); };
+      zsl.onchange = e => {
+        if (state.zrec) commitSlice(Number(e.target.value));   // release = record ONLY if on
+        fillFilm();                                            // buffer THIS slice, as for time
+      };
   } }
   { const zrb = $('#zrec'); if (zrb) zrb.onclick = () => {
       state.zrec = !state.zrec; updateFaders();
@@ -2677,7 +2698,7 @@ const AnnotatorAPI = {
   arrowNav, movePrimary, renderGridBadges, exportWells,          // navigation + export (tested)
   applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
   jget, netFetch, backendLost,                                   // network + its failure banner
-  FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp,       // the in-browser filmstrip
+  FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp, curZ, // the in-browser filmstrip
 };
 window.AnnotatorAPI = AnnotatorAPI;
 wireStageTools();
