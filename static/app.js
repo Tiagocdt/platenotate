@@ -267,6 +267,92 @@ function channelHasZ(ch){
   const cz = state.manifest && state.manifest.channel_z;
   return !!(cz && cz[ch] && cz[ch].length);
 }
+// ---- the filmstrip: a well's frames held IN THE BROWSER ---------------------------
+//
+// Scrubbing used to be one HTTP round-trip per fader position. Locally that is ~12 ms
+// and feels fine; through a tunnel to a compute node it is ~150 ms, so the image lags
+// the slider by a fifth of a second and dragging to timepoint 300 fires — and makes the
+// server encode — a request for every position you pass through. No amount of server
+// tuning fixes that: the round-trip IS the delay.
+//
+// So hold the well in memory. Fetch its frames once as blobs, outward from where you
+// are, and scrub against those: after the first pass the fader is instant because
+// nothing touches the network at all. Bounded by bytes, dropped when you leave the well.
+const FILM = { key: null, frames: new Map(), bytes: 0, gen: 0,
+               cap: 180 * 1024 * 1024, done: 0, total: 0 };
+const FILM_CONCURRENCY = 5;
+
+function filmKey(){
+  return [state.plateDir, state.primary, state.channel, state.zview,
+          JSON.stringify(apiImgKeyframes(state.primary, 'slice') || [])].join('|');
+}
+
+function filmClear(){
+  for (const u of FILM.frames.values()) { try { URL.revokeObjectURL(u); } catch (e){} }
+  FILM.frames.clear(); FILM.bytes = 0; FILM.done = 0; FILM.total = 0;
+  FILM.gen++;
+}
+
+function filmFor(tp){ return FILM.frames.get(tp) || null; }
+
+// Fill outward from the frame you are on, so the frames you are most likely to scrub to
+// next arrive first. Cancels itself the moment the well, channel or focus track changes.
+async function fillFilm(){
+  const key = filmKey();
+  if (key === FILM.key) return;                 // already buffering/buffered this view
+  filmClear(); FILM.key = key;
+  const gen = FILM.gen, tps = curTps().slice();
+  if (!tps.length || !state.primary) return;
+  const here = Math.max(0, Math.min(tps.length - 1, state.frameIdx));
+  const order = [];
+  for (let d = 0; d < tps.length; d++){
+    if (here + d < tps.length) order.push(tps[here + d]);
+    if (d && here - d >= 0) order.push(tps[here - d]);
+  }
+  FILM.total = order.length;
+  let next = 0;
+  const worker = async () => {
+    while (next < order.length){
+      if (gen !== FILM.gen) return;             // moved on: stop, do not finish the well
+      const tp = order[next++];
+      if (FILM.frames.has(tp)) { FILM.done++; continue; }
+      try {
+        const r = await fetch(frameURL(state.primary, state.channel, tp, 600, curZ(tp)));
+        if (!r.ok || gen !== FILM.gen) { FILM.done++; continue; }
+        const b = await r.blob();
+        if (gen !== FILM.gen) return;
+        FILM.frames.set(tp, URL.createObjectURL(b));
+        FILM.bytes += b.size; FILM.done++;
+        if (FILM.bytes > FILM.cap) filmEvict(tp);
+        if (tp === curTp()) updateBigImg();      // the one you are looking at just landed
+        if (FILM.done % 10 === 0) updateFilmBar();
+      } catch (e){ FILM.done++; }                // a dead server is reported by netFetch
+    }
+  };
+  await Promise.all(Array.from({ length: FILM_CONCURRENCY }, worker));
+  if (gen === FILM.gen) updateFilmBar();
+}
+
+// drop the frames furthest from where you are, not the oldest: distance is what predicts
+// whether you are about to want it again
+function filmEvict(around){
+  const far = [...FILM.frames.keys()].sort((a, b) => Math.abs(b - around) - Math.abs(a - around));
+  while (FILM.bytes > FILM.cap * 0.8 && far.length){
+    const tp = far.shift();
+    const u = FILM.frames.get(tp);
+    if (u){ try { URL.revokeObjectURL(u); } catch (e){} FILM.frames.delete(tp); FILM.bytes -= 60000; }
+  }
+  if (FILM.bytes < 0) FILM.bytes = 0;
+}
+
+function updateFilmBar(){
+  const el = $('#filmBar');
+  if (!el) return;
+  const pct = FILM.total ? Math.round(FILM.done / FILM.total * 100) : 0;
+  el.style.width = pct + '%';
+  el.hidden = pct >= 100 || !FILM.total;
+}
+
 function frameURL(well, ch, tp, size, z){
   let u = `/api/frame?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}&ch=${ch}&tp=${tp}&size=${size}`;
   if (channelHasZ(ch) && z != null) u += `&z=${z}`;   // z applies within the selected channel
@@ -1094,6 +1180,7 @@ function renderDetail(){
   if (state.primary && state.primary !== state._pfWell){
     state._pfWell = state.primary; state._pfStack = null;
     prefetchWell(state.primary);                         // tier 1: the displayed plane
+    fillFilm();                                          // and pull the well INTO the browser
     armDwellPrefetch();                                  // tier 3: z-stack if you stay
   }
   const tps = curTps();
@@ -1117,7 +1204,10 @@ function updateBigImg(){
   // exactly the confusion this whole path exists to end.
   img.onerror = () => showFrameTrouble();
   img.onload = () => { const b = $('#frameTrouble'); if (b) b.hidden = true; };
-  img.src = frameURL(state.primary, state.channel, tp, 600, curZ(tp));
+  // A buffered frame is an object URL already in memory: assigning it is instant, and
+  // this is what makes dragging the fader smooth instead of one round-trip per position.
+  const buffered = filmFor(tp);
+  img.src = buffered || frameURL(state.primary, state.channel, tp, 600, curZ(tp));
   // prefetch neighbours for a smooth fader (each at its own annotated slice)
   const tps = curTps();
   [state.frameIdx - 1, state.frameIdx + 1, state.frameIdx + 2].forEach(i => {
@@ -2587,6 +2677,7 @@ const AnnotatorAPI = {
   arrowNav, movePrimary, renderGridBadges, exportWells,          // navigation + export (tested)
   applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
   jget, netFetch, backendLost,                                   // network + its failure banner
+  FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp,       // the in-browser filmstrip
 };
 window.AnnotatorAPI = AnnotatorAPI;
 wireStageTools();

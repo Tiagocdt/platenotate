@@ -204,6 +204,7 @@ function buildPage(doc){
   mk('span', { id: 'chval', parent: chRow });
   // the two pane splitters (drag targets; the app must boot with or without them)
   mk('div', { id: 'netDown' });
+  mk('i', { id: 'filmBar' });
   mk('div', { id: 'splitV', cls: 'splitter v' });
   mk('div', { id: 'splitH', cls: 'splitter h' });
   mk('span', { id: 'frameInfo', parent: detail });
@@ -525,6 +526,28 @@ const tick = () => new Promise(r => setTimeout(r, 0));
       ok(st.primary === st.manifest.wells[1], 'Plate tab: arrows move wells too');
     }
     st.scope = 'image'; st.arrowMode = 'wells'; st.rotview = null;
+  }
+
+  // ---- the filmstrip: scrubbing must not be one round-trip per position -----
+  // Dragging the fader used to fire a request per position. Locally ~12 ms; through a
+  // tunnel ~150 ms, so the image lagged the slider and the server encoded every frame
+  // you passed over. Buffered frames are object URLs already in memory.
+  {
+    const st = API.state;
+    API.filmClear();
+    const tp = API.curTp();
+    ok(API.filmFor(tp) === null, 'an unbuffered frame falls back to the network');
+    API.FILM.frames.set(tp, 'blob:fake-buffered-frame');
+    eq(API.filmFor(tp), 'blob:fake-buffered-frame', 'a buffered frame is served from memory');
+    API.updateBigImg();
+    eq(doc.getElementById('bigImg').src, 'blob:fake-buffered-frame',
+       'the viewer uses the buffered frame, with no request at all');
+    API.filmClear();
+    ok(API.filmFor(tp) === null && API.FILM.bytes === 0,
+       'leaving the well drops its filmstrip (and its memory)');
+    API.updateBigImg();
+    ok(/\/api\/frame/.test(doc.getElementById('bigImg').src),
+       'and the viewer goes back to the network for it');
   }
 
   // ---- a dead backend says so instead of spinning ---------------------------

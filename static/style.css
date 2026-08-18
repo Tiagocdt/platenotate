@@ -434,3 +434,8 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;font-size:12px;f
   background:#3a1f1c;color:#f0776a;border-bottom:1px solid var(--danger);
   font-size:12px;line-height:1.5}
 .netdown[hidden]{display:none}
+
+/* how much of this well is already in the browser — the fader is instant across it */
+.filmbar{position:absolute;left:0;bottom:1px;height:2px;background:var(--sel);opacity:.55;
+  pointer-events:none;z-index:0;transition:width .25s linear}
+.filmbar[hidden]{display:none}
