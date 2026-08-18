@@ -561,14 +561,26 @@ def _display_range(path: Path):
     which case the caller falls back to a per-frame stretch — acceptable for an
     arbitrary standalone TIFF, never for a time course.
     """
-    channel = None
+    # Which ancestor directory is the channel? Do NOT pattern-match "CO<n>":
+    # that is the ACQUIFER's naming, and a Nikon Ti2 plate has channels called
+    # "Dia", "475", "mscarlet". Missing the match silently returns None here,
+    # and the caller then per-frame-stretches a whole time course -- the exact
+    # failure this function exists to prevent. Instead remember every ancestor
+    # name and let the calibration file itself say which one is a channel.
+    seen = [p.name for p in path.parents]
+
+    def _pick(rng):
+        if not rng:
+            return None
+        for name in seen:
+            if name in rng:
+                return rng[name]
+        return None
+
     for p in path.parents:
-        if p.name.startswith("CO") and p.name[2:].isdigit():
-            channel = p.name
         key = str(p)
         if key in _DISPLAY_RANGE_CACHE:
-            rng = _DISPLAY_RANGE_CACHE[key]
-            return rng.get(channel) if rng else None
+            return _pick(_DISPLAY_RANGE_CACHE[key])
         found = None
         for name in ("plate_calibration.json", "plate_metadata.json"):
             fp = p / name
@@ -589,7 +601,7 @@ def _display_range(path: Path):
                 break
         if found is not None:
             _DISPLAY_RANGE_CACHE[key] = found
-            return found.get(channel)
+            return _pick(found)
         if p.parent == p:
             break
     return None

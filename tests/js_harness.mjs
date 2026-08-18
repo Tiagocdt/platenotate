@@ -203,6 +203,7 @@ function buildPage(doc){
   mk('input', { id: 'chslider', parent: chRow });
   mk('span', { id: 'chval', parent: chRow });
   // the two pane splitters (drag targets; the app must boot with or without them)
+  mk('div', { id: 'netDown' });
   mk('div', { id: 'splitV', cls: 'splitter v' });
   mk('div', { id: 'splitH', cls: 'splitter h' });
   mk('span', { id: 'frameInfo', parent: detail });
@@ -524,6 +525,27 @@ const tick = () => new Promise(r => setTimeout(r, 0));
       ok(st.primary === st.manifest.wells[1], 'Plate tab: arrows move wells too');
     }
     st.scope = 'image'; st.arrowMode = 'wells'; st.rotview = null;
+  }
+
+  // ---- a dead backend says so instead of spinning ---------------------------
+  // A remote session's SLURM job hit its wall clock at 05:40 and the tunnel died. fetch
+  // has no default timeout, so the app sat on a socket that would never answer and the
+  // loading overlay span forever -- reported, reasonably, as "incredibly slow".
+  {
+    const banner = doc.getElementById('netDown');
+    banner.hidden = true;
+    // the app runs in a vm sandbox with its OWN globals — override the one it sees
+    const realFetch = sandbox.fetch;
+    sandbox.fetch = () => Promise.reject(Object.assign(new Error('refused'), {name:'TypeError'}));
+    ok(typeof API.jget === 'function', 'jget is actually exported (not undefined)');
+    let threw = false;
+    try { await API.jget('/api/config'); } catch (e){ threw = true; }
+    sandbox.fetch = realFetch;
+    ok(threw, 'a request to a dead server still rejects (callers keep their error path)');
+    ok(banner.hidden === false, 'losing the backend raises a banner instead of spinning');
+    ok(/server/i.test(banner.textContent), `…and it says what happened (${banner.textContent.slice(0,44)}…)`);
+    ok(/saved/i.test(banner.textContent), '…and that saved work is not affected');
+    banner.hidden = true;
   }
 
   // ---- resizable panes: clamped, persisted, and never fatal -----------------

@@ -14,8 +14,45 @@ const elt = (tag, cls, txt) => { const e = document.createElement(tag);
   if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const clone = o => JSON.parse(JSON.stringify(o));
 function hashStr(s){ let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
-async function jget(u){ const r = await fetch(u); if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status); return r.json(); }
-async function jpost(u, b){ const r = await fetch(u, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b) });
+// The server can go away underneath the app — a remote session's SLURM job hits its wall
+// clock, an SSH tunnel drops, a laptop sleeps. When that happened the app simply waited:
+// fetch has NO default timeout, so a plate load sat behind a socket that would never
+// answer and the loading overlay spun forever. Ten minutes of "it is incredibly slow"
+// was a backend that had been dead since 05:40.
+//
+// So: every call gets a deadline, and losing the backend is reported as what it is.
+const NET_TIMEOUT_MS = 25000;
+
+function backendLost(why){
+  const el = $('#netDown');
+  if (el){
+    el.hidden = false;
+    el.textContent = 'Lost contact with the PlateNotate server' + (why ? ' — ' + why : '')
+      + '. Nothing you have already saved is affected. If this is a remote session, its '
+      + 'time may have run out; restart it and reload this page.';
+  }
+  try { hideLoading(); } catch (e){}   // never leave the overlay spinning over a dead app
+}
+function backendBack(){ const el = $('#netDown'); if (el) el.hidden = true; }
+
+async function netFetch(u, opts){
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const t = setTimeout(() => ctl && ctl.abort(), NET_TIMEOUT_MS);
+  try {
+    const r = await fetch(u, ctl ? Object.assign({}, opts, { signal: ctl.signal }) : opts);
+    backendBack();
+    return r;
+  } catch (e){
+    // a refused connection, a dropped tunnel, or our own deadline — all the same to the
+    // person waiting: the server is not there.
+    backendLost(e && e.name === 'AbortError'
+      ? 'it stopped responding' : 'the connection was refused');
+    throw e;
+  } finally { clearTimeout(t); }
+}
+
+async function jget(u){ const r = await netFetch(u); if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status); return r.json(); }
+async function jpost(u, b){ const r = await netFetch(u, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b) });
   if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status); return r.json(); }
 
 // value colouring — mirrors the legacy screen.py so tags read consistently.
@@ -2549,6 +2586,7 @@ const AnnotatorAPI = {
   activateImageTool, deactivateImageTool, get activeToolCol(){ return activeToolCol; },
   arrowNav, movePrimary, renderGridBadges, exportWells,          // navigation + export (tested)
   applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
+  jget, netFetch, backendLost,                                   // network + its failure banner
 };
 window.AnnotatorAPI = AnnotatorAPI;
 wireStageTools();

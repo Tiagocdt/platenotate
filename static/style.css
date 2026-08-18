@@ -426,3 +426,11 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;font-size:12px;f
 /* ---- brand mark ---- */
 .brand{display:flex;align-items:center;gap:7px}
 .brand .logo{border-radius:4px;display:block;flex:none}
+
+/* ---- the server went away -------------------------------------------------
+   A dead backend used to be indistinguishable from a slow one: the overlay span
+   forever and said nothing. This says it, above everything, until it comes back. */
+.netdown{position:fixed;left:0;right:0;top:46px;z-index:70;padding:8px 14px;
+  background:#3a1f1c;color:#f0776a;border-bottom:1px solid var(--danger);
+  font-size:12px;line-height:1.5}
+.netdown[hidden]{display:none}
