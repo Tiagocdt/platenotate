@@ -21,7 +21,37 @@ function hashStr(s){ let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 +
 // was a backend that had been dead since 05:40.
 //
 // So: every call gets a deadline, and losing the backend is reported as what it is.
+// A blanket deadline was wrong. Opening a folder of raw acquisition data, or discovering
+// a plate of a quarter-million files, legitimately takes minutes — and a 25 s abort turned
+// that into "AbortError: The operation was aborted" plus a "lost contact" banner, for a
+// server that was working perfectly and still thinking. So:
+//   * cheap calls keep a short deadline, which is what detects a dead server quickly;
+//   * SLOW calls get a long one, and while one is pending we PING a cheap endpoint. If the
+//     ping answers, the server is alive and working; only a failed ping means it is gone.
+// Waiting is not the same as being dead, and the app must be able to tell them apart.
 const NET_TIMEOUT_MS = 25000;
+const NET_SLOW_MS = 20 * 60 * 1000;
+const SLOW_ENDPOINTS = ['/api/open-folder', '/api/plate', '/api/wells-all', '/api/create-db',
+                        '/api/merge-folder', '/api/export'];
+function netBudget(u){
+  return SLOW_ENDPOINTS.some(p => String(u).startsWith(p)) ? NET_SLOW_MS : NET_TIMEOUT_MS;
+}
+
+// while a slow call is in flight, is the server still there at all?
+let _pingTimer = null, _slowPending = 0;
+function startLivenessPing(){
+  if (_pingTimer) return;
+  _pingTimer = setInterval(async () => {
+    if (!_slowPending){ clearInterval(_pingTimer); _pingTimer = null; return; }
+    try {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 8000);
+      const r = await fetch('/api/version', { signal: c.signal });
+      clearTimeout(t);
+      if (r.ok) backendBack();                 // still alive, just busy
+    } catch (e){ backendLost('it stopped responding'); }
+  }, 10000);
+}
 
 function backendLost(why){
   const el = $('#netDown');
@@ -36,8 +66,11 @@ function backendLost(why){
 function backendBack(){ const el = $('#netDown'); if (el) el.hidden = true; }
 
 async function netFetch(u, opts){
+  const budget = netBudget(u);
+  const slow = budget > NET_TIMEOUT_MS;
+  if (slow){ _slowPending++; startLivenessPing(); }
   const ctl = typeof AbortController === 'function' ? new AbortController() : null;
-  const t = setTimeout(() => ctl && ctl.abort(), NET_TIMEOUT_MS);
+  const t = setTimeout(() => ctl && ctl.abort(), budget);
   try {
     const r = await fetch(u, ctl ? Object.assign({}, opts, { signal: ctl.signal }) : opts);
     backendBack();
@@ -46,9 +79,12 @@ async function netFetch(u, opts){
     // a refused connection, a dropped tunnel, or our own deadline — all the same to the
     // person waiting: the server is not there.
     backendLost(e && e.name === 'AbortError'
-      ? 'it stopped responding' : 'the connection was refused');
+      ? (slow ? 'that folder took longer than ' + Math.round(budget / 60000)
+                + ' minutes to open — it may be very large, or on slow storage'
+              : 'it stopped responding')
+      : 'the connection was refused');
     throw e;
-  } finally { clearTimeout(t); }
+  } finally { clearTimeout(t); if (slow) _slowPending = Math.max(0, _slowPending - 1); }
 }
 
 async function jget(u){ const r = await netFetch(u); if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status); return r.json(); }
@@ -844,7 +880,17 @@ function openExport(kind){
   $('#exportWho').textContent = ws.length + ' well' + (ws.length === 1 ? '' : 's')
     + (state.filter.active ? ' selected' + (plates > 1 ? ` across ${plates} plates` : '')
                            : ' from ' + (state.plateDir || 'this plate'));
+  const still = kind === 'png';
+  // A still has the MP4's render options but no time window: it is the frame you are
+  // looking at. Showing a range here would invite picking one and getting one frame.
   $('#exMp4Row').style.display = (kind === 'mp4') ? '' : 'none';
+  const tpRow = $('#exTpRow'); if (tpRow) tpRow.hidden = still;
+  const sn = $('#exStillNote');
+  if (sn){
+    sn.hidden = !still;
+    sn.textContent = still ? ('snapshot of timepoint ' + (curTp() != null ? curTp() : '—')
+                              + ' — the frame you are on') : '';
+  }
   // channel checkboxes, one per discovered channel (BF, FL, and any extra fluorescence)
   const cbox = $('#exChannels'); cbox.innerHTML = '';
   state.manifest.channels.forEach(ch => {
@@ -883,6 +929,7 @@ async function runExport(){
   const num = id => { const v = parseInt(($(id).value || '').trim(), 10); return Number.isFinite(v) ? v : null; };
   const spec = {
     kind: state.exportKind,
+    tp: state.exportKind === 'png' ? curTp() : undefined,
     bundled: ($('input[name=exBundle]:checked') || {}).value === 'bundled',
     wells: ws, channels,
     tp_start: num('#exTpStart'), tp_end: num('#exTpEnd'), tp_step: num('#exTpStep'),
@@ -2294,6 +2341,7 @@ function wireStatic(){
   const _oc = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };   // null-safe bind
   _oc('#tifBtn', () => openExport('tif'));
   _oc('#mp4Btn', () => openExport('mp4'));
+  _oc('#pngBtn', () => openExport('png'));
   _oc('#exportRun', runExport);
   _oc('#jobToggle', () => openJobDock());
   _oc('#jobClear', clearDoneJobs);

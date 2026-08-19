@@ -271,6 +271,18 @@ class WellRender:
         return lines
 
 
+def _write_png(frame, out):
+    """One composed frame to disk, losslessly. PNG because a snapshot usually goes into a
+    figure or a slide, where a second lossy generation on top of the display JPEG is
+    exactly what you do not want."""
+    try:
+        from PIL import Image
+        Image.fromarray(frame).save(out, "PNG", optimize=True)
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
 def _short(name):
     m = re.search(r"AQV\d+", name or "")
     return m.group(0) if m else (name or "")[:12]
@@ -373,8 +385,13 @@ def draw_scalebar(im, um_per_px, size=14, colour=(255, 255, 255), pad=8, frac=0.
 def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
                    grid=None, gap=6, tp_start=None, tp_end=None, tp_step=None,
                    data_root=wh.DEFAULT_DATA_ROOT, smb_root=wh.DEFAULT_SMB_PROCESSED,
-                   progress=None):
-    """Render mp4(s) with the full Render spec. Returns ([Path], [note]).
+                   progress=None, still=False):
+    """Render mp4(s) — or, with still=True, ONE PNG per group — with the full Render spec.
+
+    A still is the same picture the movie would show at that timepoint: same planes, same
+    colours, same labels and scale bar, composed by the same code. Only the writing
+    differs, so a snapshot can never disagree with the movie it was taken from.
+
 
     spec = {channels:{key:{mode,z,cmap}}, rotate, overlay, labels:{…}, ease}
     `bundled` tiles every well into ONE montage; otherwise one file per well.
@@ -487,17 +504,33 @@ def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
         mtag = (spec.get("channels", {}).get(ks[0]) or {}).get("mode", "maxproj")
         if bundled:
             tag = "-".join(wells) if len(wells) <= 6 else f"{len(wells)}wells"
-            o = dest / f"{pd.name}_{tag}_{chtag}_{mtag}.mp4"
-            frames = wh._ordered_prefetch(tps, lambda t, _k=ks: montage_of(t, _k), nw, progress)
-            if fc._encode(frames, o, fps):
-                written.append(o)
-        else:
-            for w in wells:
-                o = dest / f"{pd.name}_{w}_{chtag}_{mtag}.mp4"
-                frames = wh._ordered_prefetch(
-                    tps, lambda t, _w=w, _k=ks: single_of(_w, t, _k), nw, progress)
+            stem = f"{pd.name}_{tag}_{chtag}_{mtag}"
+            if still:
+                o = dest / f"{stem}_tp{tps[0]}.png"
+                if _write_png(montage_of(tps[0], ks), o):
+                    written.append(o)
+                if progress:
+                    progress(add=1)
+            else:
+                o = dest / f"{stem}.mp4"
+                frames = wh._ordered_prefetch(tps, lambda t, _k=ks: montage_of(t, _k), nw, progress)
                 if fc._encode(frames, o, fps):
                     written.append(o)
+        else:
+            for w in wells:
+                stem = f"{pd.name}_{w}_{chtag}_{mtag}"
+                if still:
+                    o = dest / f"{stem}_tp{tps[0]}.png"
+                    if _write_png(single_of(w, tps[0], ks), o):
+                        written.append(o)
+                    if progress:
+                        progress(add=1)
+                else:
+                    o = dest / f"{stem}.mp4"
+                    frames = wh._ordered_prefetch(
+                        tps, lambda t, _w=w, _k=ks: single_of(_w, t, _k), nw, progress)
+                    if fc._encode(frames, o, fps):
+                        written.append(o)
     for o in written:
         print(f"wrote {o}")
     return written, notes

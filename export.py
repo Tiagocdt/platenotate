@@ -263,7 +263,8 @@ def _run(job_id, spec, data_root, smb_root):
             return _fallback_dest(plate, label)
 
         render = spec.get("render") or {}
-        composed = kind == "mp4" and _needs_compose(spec)
+        still = kind == "png"          # a snapshot: the movie's picture at one timepoint
+        composed = kind in ("mp4", "png") and (_needs_compose(spec) or still)
 
         by_plate = {}
         for w in (spec.get("wells") or []):
@@ -279,6 +280,8 @@ def _run(job_id, spec, data_root, smb_root):
             plate_render[plate] = _render_spec(spec, chans, pdir)
             if kind == "tif":
                 n_builds += 1 if bundled else len(wells)
+            elif still:
+                n_builds += 1
             elif composed:
                 # ONE build per plate: the composer reports a single frame total that
                 # already spans every well × channel group, so its fraction drives the
@@ -311,12 +314,19 @@ def _run(job_id, spec, data_root, smb_root):
                     build_done()
                     if p:
                         outs.append(p)
-            else:  # mp4
-                vdir = _dest(plate, "montage" if bundled else "wells")   # None → engine default
+            else:  # mp4 / png
+                vdir = _dest(plate, ("stills" if still else
+                                     ("montage" if bundled else "wells")))
                 if composed:                                    # Render options → composer
+                    # A still is the movie's own picture, frozen: the SAME composer and
+                    # the SAME spec, with the timepoint window collapsed to the one frame.
+                    # Rendering it any other way would let a snapshot disagree with the
+                    # movie it was taken from.
+                    p_ts, p_te = (spec.get("tp"), spec.get("tp")) if still else (ts, te)
                     vids, notes = compose.build_composed(
                         plate, wells, plate_render[plate], out_dir=vdir, fps=fps,
-                        bundled=bundled, tp_start=ts, tp_end=te, tp_step=tstep,
+                        bundled=bundled, tp_start=p_ts, tp_end=p_te,
+                        tp_step=(None if still else tstep), still=still,
                         data_root=data_root, smb_root=smb_root, progress=prog)
                     build_done()
                     outs += [Path(v) for v in vids]

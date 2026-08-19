@@ -19,6 +19,7 @@
   <button id="clearFilterBtn" class="btn ghost" title="Back to single plate" hidden>Clear filter</button>
   <button id="tifBtn" class="btn" title="Export the selected wells as a TIF hyperstack">TIF</button>
   <button id="mp4Btn" class="btn" title="Export the selected wells as an MP4 movie">MP4</button>
+  <button id="pngBtn" class="btn" title="Save the CURRENT timepoint as a PNG — same render options as MP4">PNG</button>
   <label class="tb">Annotator
     <input id="annotator" type="text" placeholder="your name" size="10" list="annotatorList"
            title="Who you're saving as (press Enter to set). Not a filter — all annotations show regardless.">
@@ -279,7 +280,8 @@
       <p class="muted rnote" id="exRenderNote"></p>
     </details>
 
-    <div class="inline">timepoints &nbsp;
+    <p class="muted rnote" id="exStillNote" hidden></p>
+    <div class="inline" id="exTpRow">timepoints &nbsp;
       <input id="exTpStart" type="number" placeholder="start" style="width:5em">
       <input id="exTpEnd" type="number" placeholder="end" style="width:5em">
       <label>&nbsp;every <input id="exTpStep" type="number" placeholder="1" style="width:4em"></label>
