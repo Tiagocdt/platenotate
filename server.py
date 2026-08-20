@@ -411,6 +411,11 @@ def _open_process_db(data_root: Path, auto_create: bool = True):
         _DB["conn"] = db_store.open_db(path, check_same_thread=False)
         _DB["path"], _DB["needs_db"] = path, False
         _DB["local_fallback"] = _db_is_fallback(path)
+        # The export composer reads annotations through annotations.db_path(), which
+        # falls back to a DEV-TREE RELATIVE path — nonexistent in a packaged app or on a
+        # cluster. Nothing set MEDAKA_DB, so every well-annotation label ("injected?",
+        # "viability") silently rendered as nothing at all. Tell it where the database is.
+        os.environ["MEDAKA_DB"] = str(path)
     else:
         _DB["conn"], _DB["path"], _DB["needs_db"], _DB["local_fallback"] = None, None, True, False
     return _DB

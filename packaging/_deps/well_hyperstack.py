@@ -365,8 +365,8 @@ def _collapse_src(idxmap, tp, zs_src, z_mode, focus, slices):
     have = sorted(z for (t, z) in idxmap if t == tp and (not zs_src or z in set(zs_src)))
     if not have:
         return None
-    if z_mode == "maxproj":
-        return ("max", [idxmap[(tp, z)] for z in have])
+    if z_mode in ("maxproj", "meanproj"):
+        return ("max" if z_mode == "maxproj" else "mean", [idxmap[(tp, z)] for z in have])
     if z_mode == "slice":
         want = (list(slices) or [have[len(have) // 2]])[0] if slices else have[len(have) // 2]
         return ("plane", idxmap[(tp, min(have, key=lambda z: abs(z - want)))])
@@ -388,11 +388,26 @@ def _read_src(src, H, W):
     kind, arg = src
     if kind == "plane":
         return _read(arg)
-    if kind == "max":
+    if kind in ("max", "mean"):
+        # max = brightest value per pixel across z: hazy (out-of-focus slices still glow)
+        # and biased bright (the max of N noisy samples rises with N). mean is dimmer and
+        # softer but unbiased, and averages noise down instead of up.
         acc = None
+        n = 0
         for p in arg:
             a = _fit(_read(p), H, W)
-            acc = a if acc is None else np.maximum(acc, a)
+            if kind == "max":
+                acc = a if acc is None else np.maximum(acc, a)
+            else:
+                acc = a.astype(np.float32) if acc is None else acc + a
+                n += 1
+        if acc is None:
+            return acc
+        if kind == "mean":
+            # round, never rescale: the sources keep their own intensity scale, and a
+            # projection that quietly renormalises is not comparable to anything.
+            acc = np.rint(acc / max(1, n))
+            return acc.astype(np.uint16) if acc.max() > 255 else acc.astype(np.uint8)
         return acc
     a, b, frac = arg                                 # 'blend' — fractional focus
     pa = _fit(_read(a), H, W)

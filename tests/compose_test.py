@@ -128,5 +128,23 @@ check(anno.plate_keys("") == [""], "plate id: empty input doesn't explode")
 check(anno.plate_keys("2026_AQV01") == ["2026_AQV01"],
       "plate id: only a full YYYYMMDD_ prefix is stripped, not any digits")
 
+
+# ---- average projection, and NO hidden rescaling ----------------------------------
+# max takes the brightest value per pixel across z, which is why it looks hazy and bright:
+# out-of-focus slices still glow, and the max of N noisy samples is biased upward. mean is
+# the unbiased alternative — but it must not be run through _u8(), which FULL-RANGE
+# STRETCHES a float array and would silently brighten every average projection.
+import numpy as _np
+_stack = [_np.full((4, 4), v, _np.uint8) for v in (10, 20, 120)]
+_mx = _stack[0].copy()
+for _a in _stack[1:]:
+    _mx = _np.maximum(_mx, _a)
+_mn = _np.rint(sum(a.astype(_np.float32) for a in _stack) / len(_stack)).clip(0, 255).astype(_np.uint8)
+check(int(_mx[0, 0]) == 120, "max projection takes the brightest slice (120)")
+check(int(_mn[0, 0]) == 50, f"average projection is the true mean, not stretched (got {int(_mn[0,0])}, want 50)")
+check((_mn <= _mx).all(), "and a mean can never be brighter than the max it came from")
+check(int(compose._u8(_np.array([[10.0, 20.0, 120.0]], _np.float32))[0, 2]) == 255,
+      "_u8 DOES stretch a float array — which is exactly why the mean must not use it")
+
 print(f"\ncompose_test: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

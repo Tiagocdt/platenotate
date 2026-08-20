@@ -201,15 +201,32 @@ class WellRender:
         zs = sorted({z for (t, z) in idx if t == tp}) or sorted({z for (_t, z) in idx})
         if not zs:
             return np.zeros((self.H, self.W), np.uint8)
-        if mode == "maxproj":
+        if mode in ("maxproj", "meanproj"):
+            # MAX takes the brightest value at each pixel across z. That is why a max
+            # projection looks hazy and bright: out-of-focus slices still contribute their
+            # glow, and the maximum of N noisy samples is biased upward, so the whole
+            # frame lifts. MEAN averages instead — dimmer and softer, but unbiased, and it
+            # suppresses noise by sqrt(N) rather than amplifying it.
             acc = None
+            n = 0
             for z in zs:
                 p = idx.get((tp, z))
                 if p is None:
                     continue
                 a = wh._fit(_u8(wh._read(p)), self.H, self.W)
-                acc = a if acc is None else np.maximum(acc, a)
-            return acc if acc is not None else np.zeros((self.H, self.W), np.uint8)
+                if mode == "maxproj":
+                    acc = a if acc is None else np.maximum(acc, a)
+                else:
+                    acc = a.astype(np.float32) if acc is None else acc + a
+                    n += 1
+            if acc is None:
+                return np.zeros((self.H, self.W), np.uint8)
+            if mode == "maxproj":
+                return acc
+            # NOT _u8(): that full-range stretches a float array, which would silently
+            # brighten every average projection. The inputs are already uint8, so their
+            # mean is already in range — round it, do not rescale it.
+            return np.rint(acc / max(1, n)).clip(0, 255).astype(np.uint8)
         if mode == "focus" and self.focus is not None:
             if key == "bf":                                # fractional blend of two slices
                 return _u8(fc._bf_focus_frame(self.chd["bf"], tp, self.focus.get(tp, self.mid_z),

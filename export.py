@@ -235,6 +235,22 @@ def _run(job_id, spec, data_root, smb_root):
         use_anno = bool(spec.get("use_annotations"))
         edir = (spec.get("export_dir") or "").strip()   # Settings: where TIF/MP4 exports go
 
+        def _default_root():
+            """Where exports go when Settings names nowhere: ONE folder BESIDE the plate
+            folders, never inside them.
+
+            The engine's own default is `<plate>/processed/detailed/`, which scatters
+            output through the data itself — a plate folder should hold the plate, not a
+            growing pile of everyone's montages. `data_root` IS the parent of the plate
+            folders, so that is where the exports live, in one place you can find them."""
+            try:
+                r = Path(data_root) / "PlateNotate exports"
+                if _can_write(r):
+                    return r
+            except Exception:                              # noqa: BLE001
+                pass
+            return _fallback_export_root()
+
         def _dest(plate, label):
             """<export_dir>/<plate>/<label>/, or None to let the engine write beside the
             plate — but only ever a folder we have PROVEN we can write to.
@@ -253,13 +269,10 @@ def _run(job_id, spec, data_root, smb_root):
                 _note_redirect(f"the export folder ({Path(edir).expanduser()}) cannot be "
                                f"written to")
                 return _fallback_dest(plate, label)
-            pdir = _plate_dir(plate, by_plate.get(plate) or [], data_root, smb_root)
-            if pdir is None:
-                return None            # the plate itself is missing; let the engine say so
-            beside = Path(pdir) / "processed" / "detailed" / label
-            if _can_write(beside):
-                return None                              # the engine's own default is fine
-            _note_redirect(f"the plate folder ({pdir}) cannot be written to")
+            d = _default_root() / plate / label
+            if _can_write(d):
+                return d
+            _note_redirect(f"the export folder ({_default_root()}) cannot be written to")
             return _fallback_dest(plate, label)
 
         render = spec.get("render") or {}

@@ -532,6 +532,32 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     st.arrowMode = 'wells'; st.fader = 'time';
   }
 
+  // ---- the FILTERED grid colours by the active column too --------------------
+  // It used to bail out of renderGridBadges in filter mode, so a filtered grid showed
+  // which wells matched but not what they were annotated as — the one thing you look at
+  // a filtered grid to see.
+  {
+    const st = API.state;
+    st.filter.active = true;
+    st.filter.data = { columns: { viability: { type: 'binary', values: ['alive','dead'] } } };
+    st.filter.results = [
+      { plate: 'PLATE1', well: 'A01', short: 'P1', nann: 2, ann: { viability: 'dead' } },
+      { plate: 'PLATE1', well: 'A02', short: 'P1', nann: 1, ann: {} },
+    ];
+    const idx = API.filterAnnIndex();
+    eq(idx.get('PLATE1|A01').viability, 'dead', 'the filter results index by plate|well');
+    st.activeCol = 'viability';
+    API.renderFilterGrid();
+    const c1 = st.cells.get('PLATE1|A01'), c2 = st.cells.get('PLATE1|A02');
+    ok(c1 && c1.querySelector('.badge'), 'a filtered cell has a badge to paint');
+    eq(c1.querySelector('.badge').textContent, 'dead',
+       'the active column shows its value on the filtered grid');
+    eq(c2.querySelector('.badge').textContent, '',
+       'a well without that annotation stays blank rather than guessing');
+    st.filter.active = false; st.filter.results = []; st.filter.data = null;
+    st.activeCol = null; st._filterSig = '';
+  }
+
   // ---- the filmstrip: scrubbing must not be one round-trip per position -----
   // Dragging the fader used to fire a request per position. Locally ~12 ms; through a
   // tunnel ~150 ms, so the image lagged the slider and the server encoded every frame

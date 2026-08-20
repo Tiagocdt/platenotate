@@ -772,7 +772,8 @@ function exportWells(){
 // Render options ------------------------------------------------------------
 // PLANE = which z the frame shows for a channel. 'focus' replays the slice keyframes
 // as a continuous track (a focus pull); 'maxproj' flattens the stack; 'slice' pins one.
-const PLANE_MODES = [['maxproj', 'max projection'], ['focus', 'annotated focus'],
+const PLANE_MODES = [['maxproj', 'max projection'], ['meanproj', 'average projection'],
+                     ['focus', 'annotated focus'],
                      ['mid', 'middle slice'], ['slice', 'one slice']];
 const CMAPS = ['gray', 'invert', 'green', 'magenta', 'cyan', 'red', 'blue', 'yellow',
                'orange', 'amber', 'violet', 'ice', 'sepia', 'magma', 'viridis'];
@@ -1074,6 +1075,7 @@ function renderFilterGrid(){
     img.src = frameURLd(r.plate, r.well, state.channel, filterTp(r), 130);
     cell.appendChild(img);
     cell.appendChild(Object.assign(elt('span','plate-lab'), { textContent: `${r.short} ${r.well}` }));
+    cell.appendChild(elt('span', 'badge'));   // the active column paints here
     cell.appendChild(Object.assign(elt('span','nann'), { textContent: r.nann }));
     cell.onclick = e => onFilterCellClick(r, e);
     g.appendChild(cell);
@@ -1117,14 +1119,27 @@ async function loadFilterWell(plate, well){
 
 function renderGridBadges(){
   const filt = state.filter.active;
-  const col = (!filt && state.activeCol) ? state.payload.columns[state.activeCol] : null;
+  // The active column colours the grid in filter mode too. It used to bail here — the
+  // filtered grid showed which wells MATCHED but not what they were annotated as, which
+  // is the one thing you are looking at a filtered grid to see.
+  const fdata = state.filter.data || {};
+  const cols = (filt && fdata.columns && Object.keys(fdata.columns).length)
+               ? fdata.columns : (state.payload.columns || {});
+  const col = state.activeCol ? cols[state.activeCol] : null;
+  const fann = filt ? filterAnnIndex() : null;
   const ia = state.payload.image_annotations || {};
   for (const [, cell] of state.cells){
     const w = cell.dataset.well;
     if (filt){                                 // filter cells: cross-plate selection highlight
       cell.classList.toggle('selected', state.filterSel.has(cell.dataset.plate + '|' + w));
       cell.classList.toggle('primary', cell.dataset.plate === state.plateDir && state.primary === w);
-      continue;                                // filter cells carry their own label, no badge/dot
+      const badge = cell.querySelector('.badge');
+      if (badge){
+        const v = col ? (fann.get(cell.dataset.plate + '|' + w) || {})[state.activeCol] : undefined;
+        if (v == null){ badge.textContent = ''; badge.style.background = 'transparent'; }
+        else { badge.textContent = fmtVal(v); badge.style.background = valueColor(col, v); }
+      }
+      continue;
     }
     cell.classList.toggle('selected', state.sel.has(w));
     cell.classList.toggle('primary', state.primary === w);
@@ -1138,6 +1153,13 @@ function renderGridBadges(){
     if (v == null){ badge.textContent = ''; badge.style.background = 'transparent'; }
     else { badge.textContent = fmtVal(v); badge.style.background = valueColor(col, v); }
   }
+}
+// {plate|well -> annotations} straight out of the filter results, so the filtered grid
+// can colour by the active column without loading every plate's payload.
+function filterAnnIndex(){
+  const m = new Map();
+  for (const r of (state.filter.results || [])) m.set(r.plate + '|' + r.well, r.ann || {});
+  return m;
 }
 function onCellClick(w, e){
   state.arrowMode = 'wells';                             // ← → now move between wells
@@ -2796,6 +2818,7 @@ const AnnotatorAPI = {
   applySplit, buildChannelButtons, updateChannelFader,           // layout + channel fader
   jget, netFetch, backendLost,                                   // network + its failure banner
   availableFaders, currentFader, cycleFader, updateFaderSel,     // the keyboard's fader model
+  filterAnnIndex, renderFilterGrid,                              // the filtered grid
   FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp, curZ, // the in-browser filmstrip
 };
 window.AnnotatorAPI = AnnotatorAPI;
