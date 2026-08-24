@@ -74,6 +74,17 @@ jobs:
           Write-Host "::error::the app produced no selftest log (exit code $($p.ExitCode))"
           exit 1
 
+      # ---- the OUTPUT is checked against laws, not just "does it run" ----
+      # Every bug that reached a user was SILENT: the code ran and returned something
+      # plausible that was wrong (a projection brighter than its own max, labels that
+      # rendered as nothing, exports that wrote no file). Unit tests cannot catch that.
+      # These are laws about the pixels, and they gate the release.
+      - name: Validate the output against its laws
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        shell: bash
+        run: python tests/validate.py
+
       # ---- the GUI LAUNCH path, headless ----
       # --selftest exits long before the window is created, so it never touched the
       # banner/launch code — which is precisely where the Windows build died on a

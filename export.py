@@ -283,15 +283,26 @@ def _run(job_id, spec, data_root, smb_root):
         for w in (spec.get("wells") or []):
             by_plate.setdefault(w["plate"], []).append(w["well"])
 
+        # A BUNDLED montage of a cross-plate selection is ONE montage of that selection.
+        # Grouping by plate first gave you several montages of parts of it — the wells you
+        # picked, split up by an accident of where they live. Only the composer can do
+        # this (it resolves each plate but lays out one grid), so TIF still groups.
+        cross = (bundled and composed and len(by_plate) > 1)
+
         # resolve each plate's channels once, and count total output builds up front so
         # the overall bar is one smooth 0→100% across every well (not per-well).
         plate_channels, plate_render, n_builds = {}, {}, 0
+        _cross_counted = False
         for plate, wells in by_plate.items():
             pdir = _plate_dir(plate, wells, data_root, smb_root)
             chans = _translate_channels(raw_channels, pdir)
             plate_channels[plate] = chans
             plate_render[plate] = _render_spec(spec, chans, pdir)
-            if kind == "tif":
+            if cross:
+                if not _cross_counted:
+                    n_builds += 1                      # ONE montage, however many plates
+                    _cross_counted = True
+            elif kind == "tif":
                 n_builds += 1 if bundled else len(wells)
             elif still:
                 n_builds += 1
@@ -309,6 +320,25 @@ def _run(job_id, spec, data_root, smb_root):
             job["units_done"] = 0
 
         outs = []
+        if cross:
+            groups = [(pl, wl) for pl, wl in by_plate.items()]
+            first = groups[0][0]
+            prog(phase=f"{sum(len(w) for _p, w in groups)} wells across "
+                       f"{len(groups)} plates…")
+            label = "stills" if still else "montage"
+            p_ts, p_te = (spec.get("tp"), spec.get("tp")) if still else (ts, te)
+            vids, notes = compose.build_composed(
+                first, by_plate[first], plate_render[first],
+                out_dir=_dest("cross-plate", label), fps=fps, bundled=True,
+                tp_start=p_ts, tp_end=p_te, tp_step=(None if still else tstep),
+                still=still, plate_groups=groups,
+                data_root=data_root, smb_root=smb_root, progress=prog)
+            build_done()
+            outs += [Path(v) for v in vids]
+            with lock:
+                job["notes"] = (job.get("notes") or []) + list(notes)
+            by_plate = {}                     # handled: do not also render it per plate
+
         for plate, wells in by_plate.items():
             channels = plate_channels[plate]
             prog(phase=f"{plate}: {len(wells)} well(s)…")

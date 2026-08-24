@@ -402,7 +402,7 @@ def draw_scalebar(im, um_per_px, size=14, colour=(255, 255, 255), pad=8, frac=0.
 def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
                    grid=None, gap=6, tp_start=None, tp_end=None, tp_step=None,
                    data_root=wh.DEFAULT_DATA_ROOT, smb_root=wh.DEFAULT_SMB_PROCESSED,
-                   progress=None, still=False):
+                   progress=None, still=False, plate_groups=None):
     """Render mp4(s) — or, with still=True, ONE PNG per group — with the full Render spec.
 
     A still is the same picture the movie would show at that timepoint: same planes, same
@@ -412,10 +412,30 @@ def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
 
     spec = {channels:{key:{mode,z,cmap}}, rotate, overlay, labels:{…}, ease}
     `bundled` tiles every well into ONE montage; otherwise one file per well.
-    With overlay=False and several channels, each channel gets its own file."""
-    pd, per_well, wells, on_smb = wh.resolve_wells(plate, wells_in, data_root, smb_root)
-    if pd is None:
-        return [], [f"no plate folder matching {plate!r}"]
+    With overlay=False and several channels, each channel gets its own file.
+
+    `plate_groups` = [(plate, [wells]), …] renders a CROSS-PLATE montage: every well from every
+    plate in ONE grid. Selecting wells across plates and getting one montage per plate is
+    not a montage of your selection, it is several montages of parts of it. Wells are
+    keyed "<plate>|<well>" internally because A01 exists on every plate and would
+    otherwise collide.
+    """
+    tiles = []           # [(plate_dir, well, per_well_entry, uid, on_smb)]
+    notes = []
+    for gplate, gwells in (plate_groups or [(plate, wells_in)]):
+        pd, per_well, wl, on_smb = wh.resolve_wells(gplate, gwells, data_root, smb_root)
+        if pd is None:
+            notes.append(f"no plate folder matching {gplate!r}")
+            continue
+        for w in wl:
+            tiles.append((pd, w, per_well[w], f"{pd.name}|{w}", on_smb))
+    if not tiles:
+        return [], (notes or [f"no plate folder matching {plate!r}"])
+    multi = len({t[0].name for t in tiles}) > 1
+    pd = tiles[0][0]
+    on_smb = any(t[4] for t in tiles)
+    per_well = {t[3]: t[2] for t in tiles}
+    wells = [t[3] for t in tiles]                       # unit ids from here on
 
     tps = sorted({tp for d in per_well.values() for (tp, _z) in d.get("bf", {})})
     if tp_start is not None:
@@ -435,24 +455,29 @@ def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
                     f"{sorted(k for k in present if not k.endswith('_z'))})"]
 
     sample = _u8(wh._read(next(iter(per_well[wells[0]]["bf"].values()))))
-    H, W = sample.shape[:2]
+    H, W = sample.shape[:2]        # every tile is _fit() to this, so mixed plates align
 
     import annotations as anno
-    wann = anno.well_annotations(pd.name, screening_dir=pd)
-    meta = anno.plate_meta(pd.name)
+    # Annotations, cadence and pixel size are per PLATE, so on a cross-plate montage each
+    # tile must read its own plate's — sharing one plate's would mislabel every other tile.
+    _pann, _pmeta = {}, {}
+    for u_pd, _w, _d, _uid, _s in tiles:
+        if u_pd.name not in _pann:
+            _pann[u_pd.name] = anno.well_annotations(u_pd.name, screening_dir=u_pd)
+            _pmeta[u_pd.name] = anno.plate_meta(u_pd.name)
     lb = spec.get("labels") or {}
     um_px = None
     if lb.get("scalebar"):
         um_px = lb.get("um_per_px") or anno.pixel_size_um(pd.name)
 
-    notes = []
     rends = {}
-    for w in wells:
-        r = WellRender(pd, w, per_well[w], tps, spec, H, W,
-                       wann=wann.get(w, {}), cadence=meta.get("cadence_min"))
-        rends[w] = r
+    for u_pd, w, d, uid, _s in tiles:
+        r = WellRender(u_pd, w, d, tps, spec, H, W,
+                       wann=_pann[u_pd.name].get(w, {}),
+                       cadence=_pmeta[u_pd.name].get("cadence_min"))
+        rends[uid] = r
         for n in r.notes:
-            notes.append(f"{w}: {n}")
+            notes.append(f"{uid}: {n}")
 
     lsize = int(lb.get("size") or max(11, round(H * 0.045)))
     lcorner = lb.get("corner") or "tl"
@@ -519,9 +544,14 @@ def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
     for ks in groups:
         chtag = "+".join(k.upper() for k in ks) if len(ks) > 1 else ks[0].upper()
         mtag = (spec.get("channels", {}).get(ks[0]) or {}).get("mode", "maxproj")
+        # `wells` are unit ids ("<plate>|<well>") now, so filenames use the bare names —
+        # and say so when the montage spans plates.
+        bare = [t[1] for t in tiles]
         if bundled:
-            tag = "-".join(wells) if len(wells) <= 6 else f"{len(wells)}wells"
-            stem = f"{pd.name}_{tag}_{chtag}_{mtag}"
+            tag = "-".join(bare) if len(bare) <= 6 else f"{len(bare)}wells"
+            if multi:
+                tag += f"_{len({t[0].name for t in tiles})}plates"
+            stem = f"{pd.name if not multi else 'multi'}_{tag}_{chtag}_{mtag}"
             if still:
                 o = dest / f"{stem}_tp{tps[0]}.png"
                 if _write_png(montage_of(tps[0], ks), o):
@@ -534,18 +564,18 @@ def build_composed(plate, wells_in, spec, out_dir=None, fps=20, bundled=True,
                 if fc._encode(frames, o, fps):
                     written.append(o)
         else:
-            for w in wells:
-                stem = f"{pd.name}_{w}_{chtag}_{mtag}"
+            for uid, w in zip(wells, bare):
+                stem = f"{uid.split('|')[0]}_{w}_{chtag}_{mtag}"
                 if still:
                     o = dest / f"{stem}_tp{tps[0]}.png"
-                    if _write_png(single_of(w, tps[0], ks), o):
+                    if _write_png(single_of(uid, tps[0], ks), o):
                         written.append(o)
                     if progress:
                         progress(add=1)
                 else:
                     o = dest / f"{stem}.mp4"
                     frames = wh._ordered_prefetch(
-                        tps, lambda t, _w=w, _k=ks: single_of(_w, t, _k), nw, progress)
+                        tps, lambda t, _w=uid, _k=ks: single_of(_w, t, _k), nw, progress)
                     if fc._encode(frames, o, fps):
                         written.append(o)
     for o in written:
