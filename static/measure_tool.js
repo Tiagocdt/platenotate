@@ -244,10 +244,18 @@
   // -- geometry: displayed-image rect in STAGE-local coords ---------------
   // Two nested transforms: the <img> element box is flex-centred inside #stage,
   // and object-fit:contain letterboxes the natural image WITHIN that box.
+  // The SOURCE pixel grid: the host's (a stack plate measures in its full-resolution
+  // pixels whatever resolution is on screen), else the displayed image's own.
+  function sourceDims(img) {
+    if (T.api && typeof T.api.sourceSize === 'function') {
+      try { const s = T.api.sourceSize(); if (s && s.w > 0 && s.h > 0) return [s.w, s.h]; } catch (e) {}
+    }
+    return [img.naturalWidth || 0, img.naturalHeight || 0];
+  }
   function geom() {
     const stage = stageEl(), img = imgEl();
     if (!stage || !img || typeof stage.getBoundingClientRect !== 'function') return null;
-    const natW = img.naturalWidth || 0, natH = img.naturalHeight || 0;
+    const [natW, natH] = sourceDims(img);
     if (!(natW > 0 && natH > 0)) return null;
     const sr = stage.getBoundingClientRect(), ir = img.getBoundingClientRect();
     if (!(ir.width > 0 && ir.height > 0)) return null;

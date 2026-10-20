@@ -4,6 +4,97 @@ All notable changes to PlateNotate. Versions are `MAJOR.MINOR.PATCH`; the number
 `VERSION` is what the app reports, and `run.sh` fast-forwards a git checkout to the
 newest commit on launch.
 
+## [1.13.0] — 2026-10-20
+
+### Added — a folder of per-position hyperstacks opens as a plate
+
+A Nikon Ti2 or Zeiss LSM session, once its channels are merged, is one hyperstack per
+position: `time x z x channel x Y x X` in a single TIFF of 1-42 GB. PlateNotate read
+only one image file per (channel, well, z, timepoint), so a Ti2 run had to be exploded
+into ~160,000 small files before it could be annotated — and only at 576 px, a 4x4 bin
+of the real 2304 px frame. Now the folder of stacks IS the plate (layout `stacks`,
+`stacks.py`): one file = one well, the well id is the file stem, and the time, channel
+and z faders work exactly as on a crop plate.
+
+* **Never the whole stack.** An uncompressed ImageJ hyperstack is one contiguous block,
+  so plane k is a single read at `offset0 + k * plane_bytes` — including ImageJ files over
+  4 GiB, which keep only one page header. An OME-TIFF has one compressed page per plane;
+  its page chain is walked ONCE in the background — one 4 KiB read per page, 7-17 s for a
+  16,000-plane Ti2 file on the cluster (measured), longer over SMB — and kept in
+  `~/.medaka_annotator/stackindex/`; after that a plane is one read and the decompression
+  of its own strips. Read-ahead is switched off for these files: every read is exactly what
+  is needed, and the next one is megabytes away. Nothing is written next to the images.
+* **Full resolution on demand.** `<name>.ome.tif` + `<name>_bin4.tif` are one position at
+  two resolutions. The grid and the time fader read the small level; scrolling on the
+  image zooms in (drag to move, double-click for fit / 1:1) and the frame you stop on is
+  fetched at the resolution the screen can show, up to the full 2304 px. While the full
+  level is still being indexed the binned frame stands in — it is labelled so and never
+  cached as if it were the real one.
+* **Honest pixels.** 8-bit planes are served as stored. Downsampling is an area mean
+  computed in floating point and rounded once (PIL's 8-bit box filter rounds after each
+  pass and was off by up to a grey level — caught by the new law). 16-bit stacks go
+  through ONE fixed map per channel — the plate's calibration, else the file's own
+  display range (ImageJ `Ranges`) — never a per-frame stretch; the map is shown next to
+  the frame.
+* **Measurements in full-resolution pixels.** On a stack plate a line is stored in the
+  full frame's pixel grid whatever resolution is on screen, and µm come from the file's
+  own pixel size (OME `PhysicalSizeX` / ImageJ resolution) — the ACQUIFER 2x2 binning
+  factor is not applied to a Ti2 or LSM file.
+* **Names you can read.** Wells keep the full stem as their key (it is what annotations
+  are stored under and must never change), but the grid shows the part that differs —
+  `Point0000`, not `20261016_181713_463_Point0000_8bit` — and an optional
+  `plate_metadata.json` beside the stacks can rename channels (`channel_labels`) and give
+  each position a condition and note, shown on hover and in the detail header.
+* A folder of stacks opened **directly** is offered as the plate (it used to say "no plate
+  folders found" in front of ten stacks). Exports render from crop files and are switched
+  off for stack plates for now; the stacks open directly in Fiji.
+
+`tests/validate.py` gained 20 laws (39 in all): every plane of five TIFF layouts equals
+tifffile's reading of it; one frame reads only its own bytes; the binned and full levels
+of one position are one well and mismatched ones are not; through the real server the
+served frame is the plane, a downsample is the area mean, a stand-in is labelled and not
+cached, and one 16-bit count shows as one grey at every timepoint. `--stacks <folder>`
+runs the same comparison on real data. `js_harness.mjs`: 27 new checks (156).
+
+### Changed — CSV/JSON side copies are opt-in and never land in the data root (fix of 2026-09-18)
+
+Every save wrote `<plate>.json` and `<plate>_annotations.csv` next to the plate
+folders (Settings.formats defaulted csv/json to on, destination = the database's
+folder). Ten plates later the processed root held twenty such files, plus the
+same again on every other folder the app was ever pointed at, and all of it was a
+copy of what `medaka.db` already holds. Defaults are now `csv: false, json: false`.
+When switched on they go to `<data root>/PlateNotate exports/annotations/` (or the
+explicit `annotations_dir`), never the root. Pinned in `tests/side_export_test.py`.
+Existing files are untouched; the database was verified to contain every row they do.
+
+### Fixed — a plate that grew on disk kept showing its old timepoint count (fix of 2026-09-04)
+
+Reported as "it still shows only the 144 timepoints for half of the wells", hours
+after a resumed crop run had written all 288 of them.
+
+`_MANIFEST_CACHE` was written once per plate path and **never invalidated** — no
+TTL, no mtime check, no endpoint to clear it. Whatever the plate looked like the
+first time the server indexed it is what it served until the process was
+restarted, with nothing in the log and no error in the UI to say the view was
+stale. This bites exactly the case the app exists for: a live acquisition, or a
+crop run resumed after more raw data arrived.
+
+Fixed by fingerprinting the plate and re-discovering when it changes. The
+fingerprint is three levels of *directory* mtimes plus `plate_metadata.json` —
+adding a frame to `<plate>/CO6/B02/SL002/` does not touch the plate root, so the
+root alone could never have detected it. Deliberately **not** the plate root's own
+mtime, or rebuilding hyperstacks under `processed/` would force a pointless
+full re-scan.
+
+Discovery globs every z-slice folder of every well, so it must not sit on the
+per-frame image path. The rule is therefore: **opening a plate re-checks the
+disk, serving a frame does not.** Pinned in `tests/manifest_cache_test.py`.
+
+## [1.8.0] – [1.12.0] — 2026-08-17 … 2026-08-24
+
+Not written up here at the time: each is described in its tag's commit message and on the
+GitHub release page (`git log v1.7.2..v1.12.0`).
+
 ## [1.7.2] — 2026-08-17
 
 ### Fixed — nudging the focus slider queued thousands of encodes

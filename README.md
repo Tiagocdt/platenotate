@@ -89,11 +89,26 @@ Layout discovery is deliberately forgiving. Any of these work:
 | per-channel (current) | `<plate>/<channel>/<well>/SL0N/*_LO<tp>_<CH>_SL0N.tif` |
 | legacy v2 | `<plate>/bf/<well>/SL0N/…` + `<plate>/fl/<well>/…` |
 | legacy v1 | `<plate>/screening/…` or `<plate>/crops/…` |
+| **stacks** | a folder of per-position hyperstacks — `<folder>/<position>.tif`, one file = one well (ImageJ hyperstack or OME-TIFF, time × z × channel) |
 | flat | a bare folder of images — one "well" per image |
 
 Timepoints are parsed from `_LO<NNN>_`, z-slices from `SL0N`, channels from the folder
 name (`plate_metadata.json` names the detection channel if present). Any number of
 channels is supported end-to-end — the viewer, the grid, and every export.
+
+**Stacks** (a Nikon Ti2 or Zeiss LSM session once its channels are merged) are read where
+they are, one plane at a time — never the whole file. Open the folder itself (or its
+parent). Channel names come from the file (OME `Channel Name`, ImageJ labels), the time
+step and pixel size too. `<name>.ome.tif` and `<name>_bin4.tif` are the same position at
+two resolutions: the overview uses the small one, and **scrolling on the image zooms in**
+to the full resolution (drag to move, double-click for fit / 1:1). A compressed OME-TIFF
+is indexed once in the background on first open (7–17 s for a 16,000-plane file on the
+EMBL cluster, longer over SMB); the index is kept in `~/.medaka_annotator/stackindex/`. 16-bit stacks are
+shown through one fixed display map per channel — the file's own display range, or the
+plate's calibration — never stretched per frame. An optional `plate_metadata.json` in the
+folder can rename channels (`"channel_labels": {"475_1": "ex475"}`) and describe positions
+(`"wells": {"Point0000": {"condition": "…", "note": "…"}}`). Exports are not available for
+stack plates yet; the stacks open directly in Fiji.
 
 ## The three scopes
 
@@ -161,6 +176,7 @@ and a `screening_<plate>.json` (schema v3) — pick the formats in Settings.
 |---|---|
 | `server.py` | stdlib HTTP backend: layout discovery, TIFF→PNG, JSON API, atomic save |
 | `model.py` | data model: three scopes, v0→v3 migration, well/frame discovery |
+| `stacks.py` | per-position hyperstacks (ImageJ / OME-TIFF) read in place, one plane at a time |
 | `db_store.py` | the SQLite store (the source of truth) |
 | `export.py` | background TIF/MP4 export jobs |
 | `version.py`, `VERSION` | version + the fast-forward self-update |

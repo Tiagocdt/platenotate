@@ -19,7 +19,8 @@ API (all JSON except /api/frame which is a PNG)::
     GET  /static/<f>             -> app.js / style.css
     GET  /api/config             -> iwamatsu stages, seed defaults, registry, plate list
     GET  /api/plate?dir=NAME     -> manifest (wells/frames/channels/autofill) + saved payload
-    GET  /api/frame?dir=&well=&ch=&tp=&size=   -> a PNG of one crop (cached, resized)
+    GET  /api/frame?dir=&well=&ch=&tp=&size=   -> a PNG of one crop (cached, resized),
+                                                  or one plane of a stack (stacks.py)
     POST /api/save   {dir, payload}            -> atomic v3 write + registry merge
 
 The client owns the live annotation state and undo/redo; the server just
@@ -45,6 +46,7 @@ from urllib.parse import urlparse, parse_qs
 
 import model
 import db_store
+import stacks
 import version
 
 class _NullStream:
@@ -214,7 +216,12 @@ def link_root(data_root, db_path):
 # WHICH formats to write (db/csv/json), and where TIF/MP4 exports go. Lives in app-data.
 _SETTINGS_DEFAULTS = {
     "annotations_dir": "",   # visible folder for the DB + CSV + JSON; "" = auto-resolve (legacy)
-    "formats": {"db": True, "csv": True, "json": True},
+    # The database is the record. CSV/JSON side copies are OPT-IN: with them on, every
+    # save dropped two files per plate into the data root (<plate>.json and
+    # <plate>_annotations.csv) until the folder was unreadable, and all of it was a
+    # duplicate of medaka.db. Turn them on in Settings if a no-SQLite copy is wanted;
+    # they then go to "PlateNotate exports/annotations/", never the root.
+    "formats": {"db": True, "csv": False, "json": False},
     "export_dir": "",        # folder for TIF/MP4 exports; "" = next to the plate (legacy)
     "filters": {},           # saved cross-plate filters: {name: {plates, constraints, …}}
     "last_data_root": "",    # the folder last opened — a packaged app reopens it
@@ -447,15 +454,24 @@ def _db_info() -> dict:
             "local_fallback": bool(_DB.get("local_fallback"))}
 
 
+SIDE_EXPORT_SUBDIR = Path("PlateNotate exports") / "annotations"
+
+
 def _write_side_exports(plate_name) -> dict:
-    """Write CSV / JSON copies of a plate's annotations to the visible annotations folder
-    (per Settings.formats). SQLite stays the source of truth; these are the human-friendly
-    no-SQLite-needed copies. Returns {fmt: path}."""
+    """Write CSV / JSON copies of a plate's annotations (per Settings.formats — both OFF
+    by default). SQLite stays the source of truth; these are the human-friendly
+    no-SQLite-needed copies. They go to an explicit `annotations_dir` if one is set,
+    otherwise to `<data root>/PlateNotate exports/annotations/` — never the data root
+    itself, which used to collect two files per plate on every save. Returns {fmt: path}."""
     s = _load_settings()
     fmts = s.get("formats") or {}
     if _DB["conn"] is None or not (fmts.get("csv") or fmts.get("json")):
         return {}
-    out_dir = Path((s.get("annotations_dir") or "").strip() or _DB["folder"] or ".").expanduser()
+    adir = (s.get("annotations_dir") or "").strip()
+    if adir:
+        out_dir = Path(adir).expanduser()
+    else:
+        out_dir = Path(_DB["folder"] or ".").expanduser() / SIDE_EXPORT_SUBDIR
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         with _DB_LOCK:
@@ -616,8 +632,10 @@ def _to_jpeg(path: Path, size: int, quality: int = 88) -> bytes:
     """The same display frame as `_to_png`, JPEG-encoded — ~2.9x smaller, which is what
     lets the cache hold whole wells instead of evicting them. Display only: annotations
     and measurements are stored in image coordinates, which the encoding never touches."""
-    png = _to_png(path, size)
-    im = Image.open(io.BytesIO(png))
+    if isinstance(path, stacks.PlaneRef):
+        im = path.render(size)[0]                  # one decode, straight to JPEG
+    else:
+        im = Image.open(io.BytesIO(_to_png(path, size)))
     if im.mode not in ("L", "RGB"):
         im = im.convert("L")
     out = io.BytesIO()
@@ -632,6 +650,10 @@ def _to_png(path: Path, size: int) -> bytes:
     PLATE's constant display range so brightness stays comparable between
     timepoints and wells; only when no calibration can be found does it fall
     back to a per-frame min-max."""
+    if isinstance(path, stacks.PlaneRef):          # a plane of a stack (stacks.py)
+        buf = io.BytesIO()
+        path.render(size)[0].save(buf, format="PNG")
+        return buf.getvalue()
     im = Image.open(path)
     im.seek(0)
     if im.mode not in ("L", "I;16", "I", "F", "RGB", "RGBA"):
@@ -797,7 +819,16 @@ def _cached_png(path: Path, size: int):
     except OSError:
         mt = 0
     tag = "png" if lossless else f"q{q}"
-    key = hashlib.sha1(f"{path}|{mt}|{size}|{tag}".encode()).hexdigest()
+    src, keep = str(path), True
+    if isinstance(path, stacks.PlaneRef):
+        # Key on the resolution LEVEL that will be read, and never keep a stand-in:
+        # while the full-resolution stack is still being indexed a zoomed-in frame is
+        # served from the binned level, and caching that under the zoomed key would
+        # show the blurry frame forever after the sharp one became readable. The
+        # level is decided once (pinned) so the key and the pixels cannot disagree.
+        path = path.pinned(size)
+        src, keep = path.cache_id(size), path.exact(size)
+    key = hashlib.sha1(f"{src}|{mt}|{size}|{tag}".encode()).hexdigest()
     fp = _frame_cache_dir() / key[:2] / (key + "." + fmt)
     try:
         b = fp.read_bytes()
@@ -808,6 +839,8 @@ def _cached_png(path: Path, size: int):
         pass
     _bump("miss")                         # this one costs a read from the image store
     b = _to_png(path, size) if lossless else _to_jpeg(path, size, q)
+    if not keep:
+        return b, mime
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
         tmp = fp.with_suffix(".tmp")
@@ -1084,8 +1117,77 @@ def _prefetch_well(man: dict, well: str, size: int, plate_id: str = "",
 
 
 # ------------------------------------------------------------------ plate cache
+# key -> {"man": manifest, "fp": fingerprint}
 _MANIFEST_CACHE: dict = {}
 _MANIFEST_LOCK = threading.Lock()
+
+# Directories that are not frames: their mtimes must not force a re-discovery.
+_FP_SKIP = {"processed", "metadata", "detailed", "screening", "logs"}
+
+
+def _plate_fingerprint(plate_dir: Path) -> tuple:
+    """Something cheap that changes when a plate gains frames or wells.
+
+    A PLATE IS NOT IMMUTABLE. A live acquisition grows it, and a crop run that
+    resumed after more raw data arrived fills in wells that were only half
+    processed. Caching the manifest for the life of the process meant those
+    frames stayed invisible until somebody restarted the server: the scrubber
+    kept showing whatever timepoint count the plate had when it was FIRST
+    opened, with no error and nothing in the log to suggest the view was stale.
+
+    Seen on OLVAS V1 — half the wells sat at 144 of 288 timepoints for hours
+    after the crops were on disk, because the server had indexed the plate
+    before the second run finished.
+
+    Adding a file to `<plate>/CO6/B02/SL002/` does not touch the plate root's
+    mtime, so the root alone cannot detect it. Walking three levels of
+    DIRECTORIES does: the SL folder's mtime moves when a frame lands in it, a
+    well folder's when a z-slice appears, a channel folder's when a well
+    appears. That is a few hundred stat() calls on a 31-well plate — fine once
+    per plate open, which is the only place this is called from.
+    """
+    out = []
+    for f in ("plate_metadata.json", "plate_calibration.json"):
+        try:
+            st = (plate_dir / f).stat()
+            out.append((f, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((f, None, None))
+
+    def walk(d: Path, depth: int):
+        try:
+            with os.scandir(d) as it:
+                for e in sorted(it, key=lambda x: x.name):
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                    if depth == 0 and e.name.lower() in _FP_SKIP:
+                        continue
+                    try:
+                        out.append((e.path[len(str(plate_dir)):], e.stat().st_mtime_ns))
+                    except OSError:
+                        continue
+                    if depth < 2:
+                        walk(Path(e.path), depth + 1)
+        except OSError:
+            pass
+
+    # Deliberately NOT the plate root's own mtime: that moves whenever any
+    # top-level folder is added, including the skipped ones, so rebuilding
+    # hyperstacks under processed/ would force a pointless full re-scan. A new
+    # CHANNEL folder is still caught -- the walk below enumerates depth 0.
+    walk(plate_dir, 0)
+    # A stack plate's wells are FILES at the top level: one added, replaced or still
+    # being written must re-index it the same way a new frame folder does.
+    try:
+        with os.scandir(plate_dir) as it:
+            for e in sorted(it, key=lambda x: x.name):
+                if e.is_file(follow_symlinks=True) and \
+                        e.name.lower().endswith(stacks.TIFF_EXTS):
+                    st = e.stat()
+                    out.append((e.name, st.st_size, st.st_mtime_ns))
+    except OSError:
+        pass
+    return tuple(out)
 
 
 def _resolve_dir(data_root: Path, dir_arg: str) -> Path:
@@ -1099,6 +1201,9 @@ def _resolve_dir(data_root: Path, dir_arg: str) -> Path:
     cand = data_root / dir_arg
     if cand.is_dir():
         return cand.resolve()
+    # the opened folder may itself BE the plate (a folder of stacks opened directly)
+    if dir_arg == data_root.name and _is_plate_dir(data_root):
+        return data_root.resolve()
     matches = sorted(d for d in data_root.iterdir()
                      if d.is_dir() and d.name.startswith(dir_arg))
     if matches:
@@ -1106,15 +1211,31 @@ def _resolve_dir(data_root: Path, dir_arg: str) -> Path:
     raise FileNotFoundError(f"no plate folder matching {dir_arg!r} under {data_root}")
 
 
-def _manifest(data_root: Path, dir_arg: str) -> dict:
+def _manifest(data_root: Path, dir_arg: str, revalidate: bool = False) -> dict:
+    """The plate index, cached.
+
+    `revalidate=True` re-checks the fingerprint and re-discovers if the plate
+    changed on disk. Only the plate-open endpoint passes it: discovery globs
+    every z-slice folder of every well, so it must never sit on the per-frame
+    image path, and re-opening the plate is exactly when a user expects new
+    frames to appear.
+    """
     plate_dir = _resolve_dir(data_root, dir_arg)
     key = str(plate_dir)
     with _MANIFEST_LOCK:
-        if key in _MANIFEST_CACHE:
-            return _MANIFEST_CACHE[key]
+        hit = _MANIFEST_CACHE.get(key)
+    if hit is not None and not revalidate:
+        return hit["man"]
+    fp = _plate_fingerprint(plate_dir) if revalidate else None
+    if hit is not None and fp == hit["fp"]:
+        return hit["man"]
+    # page indexes of compressed stacks live in app-data, never beside the images
+    stacks.set_index_dir(Path.home() / ".medaka_annotator" / "stackindex")
     man = model.discover_plate(plate_dir)
+    if fp is None:
+        fp = _plate_fingerprint(plate_dir)
     with _MANIFEST_LOCK:
-        _MANIFEST_CACHE[key] = man
+        _MANIFEST_CACHE[key] = {"man": man, "fp": fp}
     return man
 
 
@@ -1122,6 +1243,8 @@ def _frame_path(man: dict, well: str, ch: str, tp: int, z: int = None):
     entry = man["_well_index"].get(well)
     if not entry:
         return None
+    if "stack" in entry:                           # a plane of a hyperstack, not a file
+        return _stack_frame(entry, ch, tp, z)
     # a specific z-slice of a per-z channel (old BF → 'bf_z'; new per-channel → '<ch>_z')
     zk = "bf_z" if ch == "BF" else ch + "_z"
     zdk = "bf_z_dir" if ch == "BF" else ch + "_z_dir"
@@ -1143,6 +1266,21 @@ def _frame_path(man: dict, well: str, ch: str, tp: int, z: int = None):
     return Path(base) / fname if base else None
 
 
+def _stack_frame(entry: dict, ch: str, tp: int, z: int = None):
+    """(well, channel, timepoint, z) of a stack plate -> a stacks.PlaneRef.
+
+    Timepoints and z are 1-based like every other plate and clamp to the stack, the
+    way a crop plate's frame lookup takes the nearest frame; no z means the middle
+    slice, which is what a crop plate shows by default too."""
+    sw, ci = entry["stack"], entry["chan"]
+    if ch not in ci:
+        return None
+    full = sw.full
+    t = min(max(int(tp), 1), full.T) - 1
+    zi = full.Z // 2 if z is None else min(max(int(z), 1), full.Z) - 1
+    return stacks.PlaneRef(sw, t, zi, ci[ch], ch, entry.get("cal"))
+
+
 def _nearest_tp(frames: dict, tp: int) -> int:
     return min(frames, key=lambda t: abs(t - tp))
 
@@ -1155,22 +1293,36 @@ def _screening(plate_dir: Path) -> Path:
     return cands[0] if cands else plate_dir / "metadata" / f"screening_{plate_dir.name}.json"
 
 
-def _list_plates(data_root: Path) -> list:
-    """Folders under data_root that look like a processed plate (or hold crops)."""
+def _is_plate_dir(d: Path) -> bool:
+    """Does this folder look like a plate? Old bf/ + crops/ + screening/ plates, a
+    per-channel plate (its plate_metadata.json at the root distinguishes it from a
+    lone channel folder), or a folder of per-position hyperstacks."""
+    return ((d / "bf").is_dir() or (d / "crops").is_dir()
+            or (d / "screening").is_dir()
+            or (d / "plate_metadata.json").exists()
+            or _screening(d).exists()
+            or stacks.is_stack_dir(d))
+
+
+def _plate_dirs(data_root: Path) -> list:
+    """The plates under data_root — and data_root itself when the folder you opened
+    IS a plate: a folder of stacks is opened directly far more often than its parent,
+    and "no plate folders found" in front of ten stacks would be absurd."""
     out = []
     if not data_root.is_dir():
         return out
+    if stacks.is_stack_dir(data_root):
+        out.append(data_root)
     for d in sorted(data_root.iterdir()):
-        if not d.is_dir():
-            continue
-        # old bf/ + crops/ + screening/ plates, OR a new per-channel plate (its
-        # plate_metadata.json at the root distinguishes it from a lone channel folder).
-        if ((d / "bf").is_dir() or (d / "crops").is_dir()
-                or (d / "screening").is_dir()
-                or (d / "plate_metadata.json").exists()
-                or _screening(d).exists()):
-            out.append({"dir": d.name, "annotated": _screening(d).exists()})
+        if d.is_dir() and _is_plate_dir(d):
+            out.append(d)
     return out
+
+
+def _list_plates(data_root: Path) -> list:
+    """Folders under data_root that look like a processed plate (or hold crops)."""
+    return [{"dir": d.name, "annotated": _screening(d).exists()}
+            for d in _plate_dirs(data_root)]
 
 
 def _short_id(name: str) -> str:
@@ -1180,7 +1332,17 @@ def _short_id(name: str) -> str:
 
 def _plate_ntps(pd: Path) -> int:
     """Timepoint count for a plate, from the first well's first z-slice — old bf/ OR
-    the new per-channel layout (falls back to the first channel folder)."""
+    the new per-channel layout (falls back to the first channel folder), or the
+    first stack's time axis."""
+    if stacks.is_stack_dir(pd):
+        for f in stacks._stack_files(pd):
+            try:
+                sf = stacks.open_stack(f)
+            except Exception:                    # noqa: BLE001 — an unreadable file is not a plate
+                continue
+            if sf.n_planes > 1:
+                return sf.T
+        return 0
     root = pd / "bf"
     if not root.is_dir():
         cdirs = model._channel_dirs(pd)
@@ -1241,13 +1403,7 @@ def _wells_all(data_root: Path) -> dict:
     plates, wells = [], []
     colvals, coltypes = {}, {}
     meas = _measure_summary()
-    for pd in sorted(Path(data_root).iterdir()):
-        if not pd.is_dir():
-            continue
-        # same plate signals as _list_plates (old bf/crops/screening OR new per-channel)
-        if not ((pd / "bf").is_dir() or (pd / "crops").is_dir() or (pd / "screening").is_dir()
-                or (pd / "plate_metadata.json").exists() or _screening(pd).exists()):
-            continue
+    for pd in _plate_dirs(Path(data_root)):        # the same plates _list_plates offers
         short = _short_id(pd.name)
         # DB-FIRST: annotations live in medaka.db, not the per-plate screening JSON. Load
         # this plate's well-scope columns/annotations from the DB (legacy JSON fallback).
@@ -1468,8 +1624,15 @@ class Handler(BaseHTTPRequestHandler):
     def _api_plate(self, q):
         dir_arg = (q.get("dir") or [""])[0]
         who = (q.get("annotator") or [""])[0]         # isolate to this annotator's rows
-        man = _manifest(self.data_root, dir_arg)
+        # Opening a plate re-checks the disk: a plate that grew since it was last
+        # indexed must not keep showing its old timepoint count.
+        man = _manifest(self.data_root, dir_arg, revalidate=True)
         plate_name = Path(man["plate_dir"]).name
+        if man.get("layout") == "stacks":
+            # find where every plane of the compressed (full-resolution) stacks lives,
+            # in the background, two files at a time — so zooming in later is instant
+            stacks.index_in_background(
+                [lv for e in man["_well_index"].values() for lv in e["stack"].levels])
         self._send(200, _client_manifest(man, plate_name, who))
 
     def _api_prefetch(self, q):
@@ -1505,24 +1668,38 @@ class Handler(BaseHTTPRequestHandler):
         ch = (q.get("ch") or ["BF"])[0]
         try:
             tp = int((q.get("tp") or ["1"])[0])
-            size = max(16, min(1024, int((q.get("size") or ["560"])[0])))
+            size = int((q.get("size") or ["560"])[0])
         except ValueError:
             return self._err(400, "tp/size must be integers")
         zq = (q.get("z") or [""])[0]
         z = int(zq) if zq.isdigit() else None       # a chosen BF z-slice, or None = middle
         man = _manifest(self.data_root, dir_arg)
+        # Crops are small, so 1024 px was always enough. A stack's full frame is what
+        # zooming in is FOR, so a stack plate may ask for up to its own native size.
+        size = max(16, min(int(man.get("max_size") or 1024)
+                           if man.get("layout") == "stacks" else 1024, size))
         fp = _frame_path(man, well, ch, tp, z)
         if fp is None and z is not None:            # fall back to the middle slice
             fp = _frame_path(man, well, ch, tp)
         if fp is None:
             return self._err(404, f"no frame {well}/{ch}/{tp}")
-        key = (str(fp), size, _cache_settings()[1:])
+        cache = {"Cache-Control": "public, max-age=86400"}
+        src = str(fp)
+        if isinstance(fp, stacks.PlaneRef):
+            fp = fp.pinned(size)                    # ONE decision: header, key, pixels
+            lv, exact = fp.level_for(size)
+            src = fp.cache_id(size)
+            # which resolution answered, and whether it is the one asked for: a stand-in
+            # (the binned level while the full stack is still being indexed) must not
+            # be kept by the browser either, or the sharp frame would never replace it
+            cache = {"Cache-Control": "public, max-age=86400" if exact else "no-store",
+                     "X-Frame-Level": f"{lv.X}x{lv.Y}", "X-Frame-Exact": "1" if exact else "0"}
+        key = (src, size, _cache_settings()[1:])
         hit = _PNG_CACHE.peek(key)
         if hit is not None:                         # already decoded: never touch the store
             _bump("hit_ram")
             body, mime = hit
-            return self._send(200, body, mime,
-                              extra={"Cache-Control": "public, max-age=86400"})
+            return self._send(200, body, mime, extra=cache)
         # Everything below can touch the share, INCLUDING the is_file() probe — a stalled
         # mount blocks that too — so the whole lot goes through the guard.
         def read():
@@ -1539,7 +1716,7 @@ class Handler(BaseHTTPRequestHandler):
         if got is None:
             return self._err(404, f"no frame {well}/{ch}/{tp}")
         body, mime = got
-        self._send(200, body, mime, extra={"Cache-Control": "public, max-age=86400"})
+        self._send(200, body, mime, extra=cache)
 
     # -- export (TIF / MP4) -------------------------------------------------
     SMB_PROCESSED = "/Volumes/aulehla/Tiago/AQ-EMBL/PROCESSED"   # SMB fallback for crops
@@ -1552,6 +1729,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, "invalid JSON body")
         if not spec.get("wells"):
             return self._err(400, "no wells selected")
+        # The export engine renders from crop files. A stack plate has none, and an
+        # export that runs and writes nothing (or the wrong frames) is the worst kind
+        # of failure — so say no, up front.
+        for w in spec.get("wells") or []:
+            plate = (w or {}).get("plate") if isinstance(w, dict) else None
+            try:
+                if plate and model.detect_layout(_resolve_dir(self.data_root, plate)) == "stacks":
+                    return self._err(400, "Export is not available for stack plates yet "
+                                          "— the stacks open directly in Fiji.")
+            except FileNotFoundError:
+                pass
         spec["export_dir"] = (_load_settings().get("export_dir") or "").strip()   # Settings override
         jid = export.start(spec, self.data_root, self.SMB_PROCESSED)
         self._send(200, {"job_id": jid})

@@ -217,7 +217,9 @@ async function loadPlate(dir){
     state.imageMode = true;
     state.undo = []; state.redo = []; state.dirty = false;
     $('#annotator').value = state.me || state.payload.annotator || '';
+    resetZoom(); state._pfWell = null;
     buildChannelButtons();
+    updateExportButtons();
     renderAll();
     setStatus('loaded ' + man.plate, '');
   } catch (e){
@@ -302,6 +304,18 @@ function repFrame(well, ch){
 function channelHasZ(ch){
   const cz = state.manifest && state.manifest.channel_z;
   return !!(cz && cz[ch] && cz[ch].length);
+}
+// A stack plate's well id is the whole file stem (it is what annotations are stored
+// under, and it must never change). What you READ is the part that differs between
+// the wells — 'Point0000', not '20261016_181713_463_Point0000_8bit' — plus whatever
+// the plate's metadata says about it (its condition, a note).
+function wellLabel(w){
+  const L = state.manifest && state.manifest.well_labels;
+  return (L && L[w]) || w;
+}
+function wellTitle(w){
+  const info = (state.manifest && state.manifest.well_info && state.manifest.well_info[w]) || {};
+  return [wellLabel(w), info.condition, info.note].filter(Boolean).join(' · ');
 }
 // ---- the filmstrip: a well's frames held IN THE BROWSER ---------------------------
 //
@@ -401,7 +415,9 @@ function updateFilmBar(){
 }
 
 function frameURL(well, ch, tp, size, z){
-  let u = `/api/frame?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}&ch=${ch}&tp=${tp}&size=${size}`;
+  // the channel is ENCODED: a stack's channels carry the microscope's own names, and a
+  // '+' or '&' in one would otherwise reach the server as a different channel
+  let u = `/api/frame?dir=${encodeURIComponent(state.plateDir)}&well=${encodeURIComponent(well)}&ch=${encodeURIComponent(ch)}&tp=${tp}&size=${size}`;
   if (channelHasZ(ch) && z != null) u += `&z=${z}`;   // z applies within the selected channel
   return u;
 }
@@ -414,7 +430,7 @@ function sliceAt(tp){
   return Number.isFinite(z) ? z : null;
 }
 function frameURLd(dir, well, ch, tp, size){
-  return `/api/frame?dir=${encodeURIComponent(dir)}&well=${encodeURIComponent(well)}&ch=${ch}&tp=${tp}&size=${size}`;
+  return `/api/frame?dir=${encodeURIComponent(dir)}&well=${encodeURIComponent(well)}&ch=${encodeURIComponent(ch)}&tp=${tp}&size=${size}`;
 }
 // z + rotation faders. Both are IMAGE-scope controls, so they appear only on the
 // Image tab. The z-slider browses/sets focus; the rotation slider sets rotation.
@@ -459,7 +475,10 @@ function renderGrid(){
   if (state.filter.active) return renderFilterGrid();
   const g = $('#grid'); g.innerHTML = ''; state.cells.clear();
   const wells = pageWells();
-  const cols = state.manifest.layout === 'flat' ? Math.min(12, Math.ceil(Math.sqrt(wells.length))) : 12;
+  // a folder of images or of stacks is not a 96-well plate: lay it out as a square-ish
+  // grid of however many there are, not 12 wide
+  const free = state.manifest.layout === 'flat' || state.manifest.layout === 'stacks';
+  const cols = free ? Math.min(12, Math.ceil(Math.sqrt(wells.length))) : 12;
   g.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   for (const w of wells){
     const cell = elt('div', 'cell'); cell.dataset.well = w;
@@ -467,7 +486,8 @@ function renderGrid(){
     const img = elt('img'); img.loading = 'lazy'; img.draggable = false;
     if (rep) img.src = frameURL(w, rep.ch, rep.tp, 130);
     cell.appendChild(img);
-    cell.appendChild(elt('span', 'wlab', w));
+    cell.appendChild(elt('span', 'wlab', wellLabel(w)));
+    cell.title = wellTitle(w);
     cell.appendChild(elt('span', 'badge'));
     const dot = elt('span', 'imgdot'); cell.appendChild(dot);
     // rubber-band may start on a cell too; a plain (no-drag) mousedown falls
@@ -1255,10 +1275,11 @@ function armDwellPrefetch(){
   }, 20000);
 }
 function renderDetail(){
-  $('#detailWell').textContent = state.primary || '—';
+  $('#detailWell').textContent = state.primary ? wellTitle(state.primary) : '—';
   updateChannelFader();
   if (state.primary && state.primary !== state._pfWell){
     state._pfWell = state.primary; state._pfStack = null;
+    resetZoom();                                         // a new well starts at fit
     prefetchWell(state.primary);                         // tier 1: the displayed plane
     fillFilm();                                          // and pull the well INTO the browser
     armDwellPrefetch();                                  // tier 3: z-stack if you stay
@@ -1288,6 +1309,10 @@ function updateBigImg(){
   // this is what makes dragging the fader smooth instead of one round-trip per position.
   const buffered = filmFor(tp);
   img.src = buffered || frameURL(state.primary, state.channel, tp, 600, curZ(tp));
+  if (zoomable()){                    // a stack: the resolution the screen can show, once
+    if (ZOOM.sharpUrl && ZOOM.sharpKey === sharpKey(sharpSize())) img.src = ZOOM.sharpUrl;
+    else scheduleSharp();             // you stop moving (the fader plays the 600 px frames)
+  }
   // prefetch neighbours for a smooth fader (each at its own annotated slice)
   const tps = curTps();
   [state.frameIdx - 1, state.frameIdx + 1, state.frameIdx + 2].forEach(i => {
@@ -1312,7 +1337,7 @@ function showFrameTrouble(){
       b = elt('div', 'muted'); b.id = 'frameTrouble';
       b.style.cssText = 'position:absolute;left:10px;right:10px;bottom:10px;padding:6px 9px;'
         + 'border-radius:4px;background:#2a1f14;color:#e0913f;font-size:12px;z-index:5';
-      const host = ($('#bigImg') && $('#bigImg').parentElement) || document.body;
+      const host = $('#stage') || ($('#bigImg') && $('#bigImg').parentElement) || document.body;
       try {
         if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
       } catch (e){ /* no layout engine (the headless harness) — placement is cosmetic */ }
@@ -1331,6 +1356,180 @@ function showFrameTrouble(){
         + 'it will pick up again on its own once it responds.';
     }
   }).catch(() => {}).then(() => { showFrameTrouble._busy = false; });
+}
+
+// ---- zoom: a stack's full resolution, when you ask for it ---------------------------
+// A stack plate is served at 600 px like every other plate — that is what the time
+// fader buffers and what the grid needs — but its frames are 2304 px. The frame you
+// stop on is re-fetched at the resolution the screen can actually show (a large panel
+// at fit already wants more than 600 px), and zooming shows the rest: scroll on the
+// image to zoom around the pointer, drag to move, double-click for fit / full
+// resolution. The zoom lives on #zoomBox, not on the image, so the rotation the image
+// carries is left alone, and a measurement still lands in full-resolution pixels
+// (sourceSize) at any zoom.
+const ZOOM = { k: 1, x: 0, y: 0, sharpUrl: null, sharpKey: '', sharpExact: false,
+               timer: null, gen: 0, note: '' };
+const ZOOM_BASE = 600;            // the size every other view of the frame is served at
+
+function zoomable(){ return !!sourceSize(); }
+function stageRect(){
+  const st = $('#stage');
+  return (st && typeof st.getBoundingClientRect === 'function') ? st.getBoundingClientRect() : null;
+}
+// screen px per full-resolution px at fit (k = 1)
+function fitScale(){
+  const src = sourceSize(), r = stageRect();
+  if (!src || !r || !(r.width > 0 && r.height > 0)) return 0;
+  return Math.min(r.width / src.w, r.height / src.h);
+}
+// no further than two screen pixels per full-resolution pixel: past that there is
+// nothing more to see, only bigger squares
+function zoomMax(){ const f = fitScale(); return f > 0 ? Math.max(1, 2 / f) : 1; }
+function applyZoom(){
+  const box = $('#zoomBox'), st = $('#stage');
+  if (box && box.style) box.style.transform = ZOOM.k > 1
+    ? `translate(${ZOOM.x.toFixed(1)}px, ${ZOOM.y.toFixed(1)}px) scale(${ZOOM.k.toFixed(4)})` : '';
+  if (st && st.classList) st.classList.toggle('zoomed', ZOOM.k > 1);
+  const zi = $('#zoomInfo');
+  if (zi){
+    zi.hidden = !zoomable();
+    zi.textContent = ZOOM.k > 1 ? (ZOOM.k < 10 ? ZOOM.k.toFixed(1) : String(Math.round(ZOOM.k))) + '×' : 'fit';
+  }
+  renderTools();                    // the measurement overlay follows the image
+}
+// keep the zoomed box covering the stage: no panning off into nothing
+function clampPan(){
+  const r = stageRect(); if (!r) return;
+  ZOOM.x = Math.min(0, Math.max(r.width - ZOOM.k * r.width, ZOOM.x));
+  ZOOM.y = Math.min(0, Math.max(r.height - ZOOM.k * r.height, ZOOM.y));
+}
+// zoom to k, keeping the stage point (cx, cy) where it is on screen
+function zoomAt(k, cx, cy){
+  k = Math.max(1, Math.min(zoomMax(), k));
+  const px = (cx - ZOOM.x) / ZOOM.k, py = (cy - ZOOM.y) / ZOOM.k;
+  ZOOM.x = cx - k * px; ZOOM.y = cy - k * py; ZOOM.k = k;
+  if (k <= 1){ ZOOM.k = 1; ZOOM.x = 0; ZOOM.y = 0; }
+  clampPan(); applyZoom(); scheduleSharp();
+}
+// back to fit; the frame on screen is re-chosen for that size (the sharp one may no
+// longer be the right one, or may belong to the well being left)
+function resetZoom(){
+  const had = !!ZOOM.sharpUrl;
+  ZOOM.k = 1; ZOOM.x = 0; ZOOM.y = 0; dropSharp(); applyZoom();
+  if (had && state.manifest && state.primary) updateBigImg();
+}
+// the frame size the screen can show at this zoom (device pixels across the long edge),
+// in 256 px steps so nearby zooms share a cache entry; 0 = the 600 px frame is enough
+function sharpSize(){
+  const src = sourceSize(), f = fitScale();
+  if (!src || !(f > 0)) return 0;
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+  const long = Math.max(src.w, src.h);
+  const need = long * f * ZOOM.k * dpr;
+  if (need <= ZOOM_BASE * 1.05) return 0;
+  return Math.min(long, Math.ceil(need / 256) * 256);
+}
+function sharpKey(size){
+  const tp = curTp();
+  return [state.plateDir, state.primary, state.channel, tp, curZ(tp), size].join('|');
+}
+function scheduleSharp(){
+  clearTimeout(ZOOM.timer);
+  if (!zoomable()) return;
+  ZOOM.timer = setTimeout(loadSharp, 180);     // after the wheel / fader comes to rest
+}
+function dropSharp(){
+  ZOOM.gen++; clearTimeout(ZOOM.timer);
+  if (ZOOM.sharpUrl){ try { URL.revokeObjectURL(ZOOM.sharpUrl); } catch (e){} }
+  ZOOM.sharpUrl = null; ZOOM.sharpKey = ''; ZOOM.sharpExact = false; ZOOM.note = '';
+}
+async function loadSharp(){
+  const size = sharpSize(), tp = curTp();
+  if (!size || tp == null || !state.primary){ ZOOM.note = ''; updateFrameInfo(); return; }
+  const key = sharpKey(size);
+  if (key === ZOOM.sharpKey && ZOOM.sharpExact){ showSharp(); return; }
+  const gen = ++ZOOM.gen;
+  ZOOM.note = 'loading full resolution…'; updateFrameInfo();
+  try {
+    const r = await fetch(frameURL(state.primary, state.channel, tp, size, curZ(tp)));
+    if (gen !== ZOOM.gen) return;
+    if (!r.ok){ ZOOM.note = 'full resolution unavailable'; updateFrameInfo(); return; }
+    const exact = !(r.headers && r.headers.get('X-Frame-Exact') === '0');
+    const level = (r.headers && r.headers.get('X-Frame-Level')) || '';
+    const b = await r.blob();
+    if (gen !== ZOOM.gen) return;
+    if (ZOOM.sharpUrl){ try { URL.revokeObjectURL(ZOOM.sharpUrl); } catch (e){} }
+    ZOOM.sharpUrl = URL.createObjectURL(b); ZOOM.sharpKey = key; ZOOM.sharpExact = exact;
+    // say what is on screen: the level that answered, or that the full stack is still
+    // being indexed (first open only) and this is the binned frame standing in
+    ZOOM.note = exact ? (level ? `${level.split('x')[0]} px source` : '')
+                      : 'full resolution still indexing (first open) — binned frame shown';
+    showSharp();
+    if (!exact) ZOOM.timer = setTimeout(loadSharp, 1500);
+  } catch (e){ if (gen === ZOOM.gen){ ZOOM.note = ''; updateFrameInfo(); } }
+}
+function showSharp(){
+  const img = $('#bigImg');
+  if (!img || !ZOOM.sharpUrl || ZOOM.sharpKey !== sharpKey(sharpSize())) return;
+  img.src = ZOOM.sharpUrl;
+  updateFrameInfo();
+}
+function wireZoom(){
+  const st = document.getElementById('stage');
+  if (!st || typeof st.addEventListener !== 'function' || st._zoomWired) return;
+  st._zoomWired = true;
+  const local = ev => { const r = stageRect() || { left: 0, top: 0 };
+                        return [ev.clientX - r.left, ev.clientY - r.top]; };
+  st.addEventListener('wheel', ev => {
+    if (!zoomable()) return;                     // a crop plate scrolls as it always did
+    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+    const [cx, cy] = local(ev);
+    zoomAt(ZOOM.k * Math.exp(-(ev.deltaY || 0) * (ev.ctrlKey ? 0.01 : 0.0015)), cx, cy);
+  }, { passive: false });
+  st.addEventListener('dblclick', ev => {
+    if (!zoomable() || activeToolHandlers()) return;   // a drawing tool owns the clicks
+    if (ZOOM.k > 1) return resetZoom();
+    const [cx, cy] = local(ev), f = fitScale();
+    zoomAt(f > 0 ? 1 / f : 2, cx, cy);                 // 1 full-res pixel per screen pixel
+  });
+  let drag = null;
+  st.addEventListener('mousedown', ev => {
+    if (ZOOM.k <= 1 || activeToolHandlers() || (ev.button != null && ev.button !== 0)) return;
+    drag = { x: ev.clientX, y: ev.clientY, ox: ZOOM.x, oy: ZOOM.y };
+    if (st.classList) st.classList.add('panning');
+    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+  });
+  document.addEventListener('mousemove', ev => {
+    if (!drag) return;
+    ZOOM.x = drag.ox + (ev.clientX - drag.x); ZOOM.y = drag.oy + (ev.clientY - drag.y);
+    clampPan(); applyZoom();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null; if (st.classList) st.classList.remove('panning');
+    scheduleSharp();
+  });
+  const zi = document.getElementById('zoomInfo');
+  if (zi && typeof zi.addEventListener === 'function') zi.addEventListener('click', resetZoom);
+}
+// a >8-bit stack is shown through ONE fixed map per channel — say which, on screen
+function displayNote(){
+  const m = state.manifest;
+  const d = m && m.layout === 'stacks' && m.display && m.display[state.channel];
+  if (!d || d.lo == null || d.hi == null) return '';
+  const f = v => (Math.abs(v) >= 100 ? Math.round(v) : +(+v).toPrecision(3));
+  return ` · display ${f(d.lo)}–${f(d.hi)}`;
+}
+// exports render from crop files; a stack plate has none (the server refuses too)
+function updateExportButtons(){
+  const off = !!(state.manifest && state.manifest.layout === 'stacks');
+  for (const id of ['#tifBtn', '#mp4Btn', '#pngBtn']){
+    const b = $(id); if (!b) continue;
+    if (b.dataset && b.dataset.title == null) b.dataset.title = b.title || '';
+    b.disabled = off;
+    b.title = off ? 'Not available for stack plates yet — the stacks open directly in Fiji'
+                  : ((b.dataset && b.dataset.title) || b.title);
+  }
 }
 
 // Broadcast the current (well, tp) to every registered tool so it can redraw
@@ -1355,7 +1554,8 @@ function updateFrameInfo(){
   const sl = z != null ? ` · slice ${z}` : '';
   const stg = stageAt(tp);                      // effective (held) Iwamatsu stage
   const st = stg ? ` · ${stg}` : '';
-  $('#frameInfo').textContent = `tp ${tp} / ${tps[tps.length - 1]} (${state.frameIdx + 1}/${tps.length})${mins}${st}${sl}`;
+  const zn = ZOOM.note ? ` · ${ZOOM.note}` : '';
+  $('#frameInfo').textContent = `tp ${tp} / ${tps[tps.length - 1]} (${state.frameIdx + 1}/${tps.length})${mins}${st}${sl}${displayNote()}${zn}`;
 }
 // the Iwamatsu stage the keyframes forward-fill to at a given timepoint (or null)
 function stageAt(tp){
@@ -2724,6 +2924,12 @@ function pxSizeNm(){
   const pa = (state.payload && state.payload.plate_annotations) || {};
   const upp = Number(pa['um_per_px']);              // user-set µm/px in the Plate tab — wins (true µm/px)
   if (Number.isFinite(upp) && upp > 0) return upp * 1000;    // µm/px → nm/px
+  // A stack carries its own pixel size (OME PhysicalSizeX / ImageJ resolution) for its
+  // FULL-resolution level, and a stack's measurements are in exactly those pixels
+  // (sourceSize below). It is the true size — the ACQUIFER 2x2-binning factor below
+  // has nothing to do with a Ti2 or LSM file and must not be applied to it.
+  const sp = Number(state.manifest && state.manifest.layout === 'stacks' && state.manifest.px_um);
+  if (Number.isFinite(sp) && sp > 0) return sp * 1000;
   let v = Number(pa['acq_px_size_nm']);
   if (Number.isFinite(v) && v > 0) return v * PX_BINNING;    // unbinned objective px → real 2x2-binned px
   const af = (state.manifest && state.manifest.autofill) || {};
@@ -2734,11 +2940,23 @@ function pxSizeNm(){
 // ---- tool router: map #stage pointer coords → SOURCE-image px, route to the active tool ----
 // client (x,y) → source-image px: #bigImg's box (getBoundingClientRect) + the
 // object-fit:contain letterbox of the natural image within that box. Clamped.
+// The pixel grid measurements are stored in. For a crop plate that is the served image
+// itself. A stack plate is served at whatever resolution the view needs (a binned level
+// for an overview, the full frame when zoomed in), so ITS coordinates are always the
+// full-resolution pixels — otherwise the same line would measure 4x longer when drawn
+// zoomed in than when drawn zoomed out, and nothing would say so.
+function sourceSize(){
+  const m = state.manifest;
+  if (!m || m.layout !== 'stacks' || !state.primary) return null;
+  const n = m.native && m.native[state.primary];
+  return (n && n[0] > 0 && n[1] > 0) ? { w: n[0], h: n[1] } : null;
+}
 function mapClientToSource(clientX, clientY){
   const img = document.getElementById('bigImg');
   if (!img || typeof img.getBoundingClientRect !== 'function') return { x: 0, y: 0 };
   const box = img.getBoundingClientRect();
-  const natW = img.naturalWidth || 0, natH = img.naturalHeight || 0;
+  const src = sourceSize();
+  const natW = (src && src.w) || img.naturalWidth || 0, natH = (src && src.h) || img.naturalHeight || 0;
   const boxW = box.width, boxH = box.height;
   if (!(natW > 0 && natH > 0 && boxW > 0 && boxH > 0)) return { x: 0, y: 0 };
   const scale = Math.min(boxW / natW, boxH / natH);
@@ -2810,6 +3028,7 @@ const AnnotatorAPI = {
   imgInterpolate,                                                 // (well,col,tp) -> smoothstep number
   imgEffective,                                                   // (well,col,tp) -> {value,startTp} forward-filled (held)
   pxSizeNm,                                                       // -> nm/px number or null
+  sourceSize,                                                     // -> {w,h} measurement px grid, or null = the image's own
   registerTool(columnType, handlers){ toolHandlers[columnType] = handlers || {}; },
   onColumnPanel(columnType, renderFn){ toolPanels[columnType] = renderFn; },
   // convenience for the host UI / tests
@@ -2820,9 +3039,11 @@ const AnnotatorAPI = {
   availableFaders, currentFader, cycleFader, updateFaderSel,     // the keyboard's fader model
   filterAnnIndex, renderFilterGrid,                              // the filtered grid
   FILM, filmFor, filmClear, fillFilm, updateBigImg, curTp, curZ, // the in-browser filmstrip
+  ZOOM, zoomAt, resetZoom, sharpSize, wellLabel, wellTitle,       // stack plates: zoom + names
 };
 window.AnnotatorAPI = AnnotatorAPI;
 wireStageTools();
+wireZoom();
 // Announce readiness (plugins also poll + auto-install on load, so order is moot).
 try {
   if (typeof Event === 'function'){

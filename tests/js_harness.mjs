@@ -210,7 +210,11 @@ function buildPage(doc){
   mk('span', { id: 'frameInfo', parent: detail });
   const stage = mk('div', { id: 'stage', parent: detail });
   stage._rect = { left: 0, top: 0, width: 600, height: 420, right: 600, bottom: 420 };
-  const bigImg = mk('img', { id: 'bigImg', parent: stage });
+  // the zoom wrapper, as in index.html: zoom on the box, rotation on the image
+  const zoomBox = mk('div', { id: 'zoomBox', parent: stage });
+  mk('button', { id: 'zoomInfo', parent: detail });
+  for (const id of ['tifBtn', 'mp4Btn', 'pngBtn']) mk('button', { id, parent: detail });
+  const bigImg = mk('img', { id: 'bigImg', parent: zoomBox });
   bigImg.naturalWidth = 600; bigImg.naturalHeight = 600;
   bigImg.removeAttribute = function(){ this.src = ''; };
   bigImg._rect = { left: 0, top: 0, width: 600, height: 600, right: 600, bottom: 600 };
@@ -299,9 +303,28 @@ const MANIFEST = {
   autofill: { date: '2026-07-13', start_time: '10:00:00', incubation_temp_c: 26, timepoint_interval_min: 10 },
 };
 function mkRes(data){ return { ok: true, status: 200, json: () => Promise.resolve(data) }; }
+// A folder of per-position hyperstacks (stacks.py): the Ti2 shape — 2304 px frames,
+// a binned level, file-stem well ids with short display names, the file's own µm/px.
+const STACK_W = ['20261016_181713_463_Point0000_8bit', '20261016_181713_463_Point0001_8bit'];
+const STACK_MANIFEST = {
+  plate: 'merged_8bit', payload: Object.assign(freshPayload(), { plate: 'merged_8bit',
+                                                                  plate_annotations: {} }),
+  layout: 'stacks', channels: ['Dia', 'ex395', 'GFP+RFP'], detect_channel: 'Dia',
+  channel_z: { Dia: [1, 2, 3, 4, 5, 6, 7], ex395: [1, 2, 3, 4, 5, 6, 7], 'GFP+RFP': [1, 2, 3, 4, 5, 6, 7] },
+  z_slices: [1, 2, 3, 4, 5, 6, 7], wells: STACK_W,
+  frames: Object.fromEntries(STACK_W.map(w => [w, { Dia: [1, 2, 3], ex395: [1, 2, 3], 'GFP+RFP': [1, 2, 3] }])),
+  autofill: { timepoint_interval_min: 5 },
+  native: Object.fromEntries(STACK_W.map(w => [w, [2304, 2304]])),
+  levels: Object.fromEntries(STACK_W.map(w => [w, [[2304, 2304], [576, 576]]])),
+  max_size: 2304, px_um: 0.644739,
+  well_labels: { [STACK_W[0]]: 'Point0000', [STACK_W[1]]: 'Point0001' },
+  well_info: { [STACK_W[0]]: { condition: 'HYlight2' }, [STACK_W[1]]: { condition: 'dead HYlight2', note: 'arc' } },
+  display: { Dia: { source: '8-bit, shown as stored' }, ex395: { lo: 26, hi: 18142, source: 'file' } },
+};
 function fetchStub(url){
   const u = String(url);
   if (u.startsWith('/api/config')) return Promise.resolve(mkRes(CONFIG));
+  if (u.startsWith('/api/plate?dir=merged_8bit')) return Promise.resolve(mkRes(JSON.parse(JSON.stringify(STACK_MANIFEST))));
   if (u.startsWith('/api/plate')) return Promise.resolve(mkRes(JSON.parse(JSON.stringify(MANIFEST))));
   if (u.startsWith('/api/save')) return Promise.resolve(mkRes({ updated: new Date().toISOString() }));
   if (u.startsWith('/api/wells_all')) return Promise.resolve(mkRes({ columns: {}, wells: [] }));
@@ -757,6 +780,81 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     eq(Object.keys(spec.labels).length, 0, 'render: a TIF hyperstack never carries burned-in labels');
     ok(spec.overlay === false, 'render: TIF never overlays channels');
     doc.getElementById('exportModal').hidden = true;
+  }
+
+  // ---- STACK PLATES: a folder of per-position hyperstacks --------------------
+  {
+    const exp = () => ['tifBtn', 'mp4Btn', 'pngBtn'].map(id => doc.getElementById(id).disabled);
+    eq(exp().join(), 'false,false,false', 'stacks: a crop plate keeps its export buttons');
+    eq(API.sourceSize(), null, 'stacks: a crop plate measures in its own image pixels');
+    await sandbox.loadPlate('merged_8bit'); await tick();
+    const st = API.state;
+    eq(st.manifest.layout, 'stacks', 'stacks: the stack manifest is loaded');
+    eq(st.primary, STACK_W[0], 'stacks: the well KEY is the whole file stem');
+    const cell = st.cells.get(STACK_W[0]);
+    const lab = cell && cell.children.find(c => c._classes && c._classes.has('wlab'));
+    eq(lab && lab.textContent, 'Point0000', 'stacks: the grid shows the short name');
+    eq(cell && cell.title, 'Point0000 · HYlight2', 'stacks: …and its condition on hover');
+    eq(doc.getElementById('detailWell').textContent, 'Point0000 · HYlight2', 'stacks: detail header names the well + condition');
+    eq(exp().join(), 'true,true,true', 'stacks: exports are switched off (they render from crop files)');
+    const ss = API.sourceSize();
+    ok(ss && ss.w === 2304 && ss.h === 2304, 'stacks: measurements live in FULL-resolution pixels  (got ' + JSON.stringify(ss) + ')');
+    ok(Math.abs(dbg.pxSizeNm() - 644.739) < 1e-6, 'stacks: µm/px is the file\'s own, NOT x2 for ACQUIFER binning  (got ' + dbg.pxSizeNm() + ')');
+    ok(sandbox.frameURL(STACK_W[0], 'GFP+RFP', 1, 600, 4).includes('ch=GFP%2BRFP'),
+       'stacks: a channel name with + reaches the server intact');
+    ok(String(doc.getElementById('frameInfo').textContent).indexOf('display') < 0,
+       'stacks: an 8-bit channel claims no display map');
+    st.channel = 'ex395'; sandbox.updateFrameInfo();
+    ok(String(doc.getElementById('frameInfo').textContent).includes('display 26–18142'),
+       'stacks: a 16-bit channel SAYS which fixed map it is shown through');
+    st.channel = 'Dia';
+
+    // the same physical line must measure the same whether the binned (576 px) or the
+    // full (2304 px) frame is on screen — the law that a zoom cannot change a length
+    API.mutate(() => { st.payload.image_columns.egg_diameter = { type: 'measurement', values: [] }; });
+    dbg.setFrame(0);
+    API.activateImageTool('egg_diameter');
+    const img = doc.getElementById('bigImg');
+    img._rect = { left: 0, top: 0, width: 420, height: 420, right: 420, bottom: 420 };
+    const draw = (nat, t) => {
+      img.naturalWidth = nat; img.naturalHeight = nat;
+      dbg.setFrame(t);
+      mouse(stage, 'mousedown', 0, 210); mouse(stage, 'mouseup', 0, 210);
+      mouse(stage, 'mousedown', 420, 210); mouse(stage, 'mouseup', 420, 210);
+      return ((st.payload.image_annotations[STACK_W[0]] || {})[String(st.manifest.frames[STACK_W[0]].Dia[t])] || {}).egg_diameter;
+    };
+    const m576 = draw(576, 1), m2304 = draw(2304, 2);
+    ok(m576 && Math.abs(m576.length_px - 2304) < 0.5, 'stacks: a full-width line on the 576 px frame = 2304 full-res px  (got ' + (m576 && m576.length_px) + ')');
+    ok(m2304 && m576 && Math.abs(m2304.length_px - m576.length_px) < 0.5, 'stacks: …and the same on the 2304 px frame  (got ' + (m2304 && m2304.length_px) + ')');
+    ok(m576 && Math.abs(m576.length_um - 2304 * 0.644739) < 0.05, 'stacks: …which is 1485.5 µm  (got ' + (m576 && m576.length_um) + ')');
+    API.deactivateImageTool();
+    img.naturalWidth = 576; img.naturalHeight = 576;
+
+    // zoom: around the pointer, clamped, reset per well
+    const Z = API.ZOOM, box = doc.getElementById('zoomBox');
+    stage.dispatchEvent({ type: 'wheel', deltaY: -400, clientX: 300, clientY: 210, preventDefault(){} });
+    ok(Z.k > 1, 'stacks: scrolling on the image zooms in  (k=' + Z.k.toFixed(2) + ')');
+    ok(/scale\(/.test(box.style.transform || ''), 'stacks: the zoom is on #zoomBox  (' + box.style.transform + ')');
+    ok(!/scale/.test(img.style.transform || ''), 'stacks: …not on the image, which keeps its rotation');
+    API.zoomAt(1e6, 300, 210);
+    const maxK = 2 / Math.min(600 / 2304, 420 / 2304);
+    ok(Math.abs(Z.k - maxK) < 1e-6, 'stacks: zoom stops at 2 screen px per full-res px  (k=' + Z.k.toFixed(2) + ', max ' + maxK.toFixed(2) + ')');
+    ok(Z.x <= 0 && Z.y <= 0 && Z.x >= 600 - Z.k * 600 - 1e-6 && Z.y >= 420 - Z.k * 420 - 1e-6,
+       'stacks: panning keeps the image on the stage');
+    API.zoomAt(4, 300, 210);
+    eq(API.sharpSize(), 1792, 'stacks: at 4x the screen needs ~1680 px → a 1792 px frame');
+    API.zoomAt(1, 300, 210);
+    eq(API.sharpSize(), 0, 'stacks: at fit the 600 px frame is enough (no extra fetch)');
+    API.zoomAt(3, 100, 100);
+    sandbox.setPrimary(STACK_W[1], true); await tick();
+    eq(Z.k, 1, 'stacks: a new well starts at fit');
+    eq(box.style.transform, '', 'stacks: …with no transform left behind');
+
+    // back to a crop plate: nothing of the stack mode survives
+    await sandbox.loadPlate('PLATE1'); await tick();
+    eq(exp().join(), 'false,false,false', 'stacks: exports come back on a crop plate');
+    stage.dispatchEvent({ type: 'wheel', deltaY: -400, clientX: 300, clientY: 210, preventDefault(){} });
+    eq(Z.k, 1, 'stacks: a crop plate does not zoom (there is no more resolution to show)');
   }
 
   // ---- cleanup timers so Node exits promptly --------------------------------

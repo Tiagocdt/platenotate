@@ -54,7 +54,7 @@ datas = [
 
 # app + sibling modules that are imported lazily / via sys.path (so Analysis may miss them)
 hiddenimports = [
-    "server", "model", "db_store", "export", "version",
+    "server", "model", "db_store", "export", "version", "stacks",
     "well_hyperstack", "focus_cut", "compose", "annotations", "build_db",
     "numpy", "tifffile", "imagecodecs", "PIL.Image", "imageio_ffmpeg", "webview",
     "webbrowser",                          # the fallback front end when no window opens

@@ -91,9 +91,13 @@
         <b id="detailWell">—</b>
         <span class="grow"></span>
         <span id="frameInfo" class="muted">—</span>
+        <button id="zoomInfo" class="btn tiny" hidden
+                title="Zoom: scroll on the image (around the pointer) · drag to move · double-click: fit / full resolution. Click to fit.">fit</button>
       </div>
+      <!-- #zoomBox carries the zoom (scale + pan); the image keeps its own transform for
+           rotation, so neither can overwrite the other -->
       <div id="stage">
-        <img id="bigImg" alt="selected well frame" draggable="false">
+        <div id="zoomBox"><img id="bigImg" alt="selected well frame" draggable="false"></div>
       </div>
       <!-- The four axes of a frame — time, z, rotation, channel — are all faders, built
            the same way: a fixed-width key on the left, the track, the value right-
@@ -170,8 +174,8 @@
       <tr><td>c</td><td>cycle channels &nbsp;·&nbsp; , . browse z-slices &nbsp;·&nbsp; Backspace clear column</td></tr>
       <tr><td>z / Shift+Z</td><td>undo / redo &nbsp;·&nbsp; s save now</td></tr>
     </table>
-    <p class="muted">Everything autosaves. Choose the formats (database / CSV / JSON) and
-       where they're stored in the <b>Settings</b> tab.</p>
+    <p class="muted">Everything autosaves to the database. Optional CSV / JSON copies
+       (off by default) go to <i>PlateNotate exports/annotations</i> — <b>Settings</b> tab.</p>
   </div>
 </div>
 

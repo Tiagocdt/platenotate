@@ -46,6 +46,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import stacks                    # per-position hyperstacks (stdlib at import, like us)
+
 
 def _map_wells(items, fn, workers=16):
     """Run fn over well dirs in PARALLEL and return the results (order preserved). The
@@ -291,7 +293,10 @@ def _channel_dirs(plate_dir: Path):
 
 def detect_layout(plate_dir: Path) -> str:
     """'v2' (bf/+fl/ role folders), 'v3' (one folder per acquisition channel, each
-    with per-z-slice crops), 'v1_screening', 'v1_crops', or 'flat'.
+    with per-z-slice crops), 'v1_screening', 'v1_crops', 'stacks', or 'flat'.
+
+    'stacks' = a folder of per-position hyperstack TIFFs (one file = one well, each a
+    time x z x channel stack) — a Ti2 or LSM session as it is stored; see stacks.py.
 
     'flat' = the degenerate general case: a folder of images with no channel split
     (each image treated as one 'well' with a single frame). Keeps the tool usable
@@ -304,6 +309,8 @@ def detect_layout(plate_dir: Path) -> str:
         return "v1_screening"
     if (plate_dir / "crops").is_dir():
         return "v1_crops"
+    if stacks.is_stack_dir(plate_dir):
+        return "stacks"
     return "flat"
 
 
@@ -459,6 +466,8 @@ def discover_plate(plate_dir: Path) -> dict:
                 "FL": dict(_sorted_frames(fl)),
                 "bf_dir": str(d), "fl_dir": str(d),
             }
+    elif layout == "stacks":
+        return _discover_stacks(plate_dir)
     else:  # flat: a bare folder of images, one 'well' per image, single frame
         channels = ["IMG"]
         detect_channel = "IMG"
@@ -496,6 +505,108 @@ def discover_plate(plate_dir: Path) -> dict:
         "z_slices": z_slices,   # the detection channel's z-slices, e.g. [1..7]
         "autofill": autofill,
         "_well_index": wells,   # server-side use (path lookup); not sent to client
+    }
+
+
+def _plate_calibration(plate_dir: Path) -> dict:
+    """{channel: (lo, hi)} from the plate's own calibration file, if it has one — the
+    same `channel_calibrations` (p_low/p_high) a 16-bit crop plate carries."""
+    for name in ("plate_calibration.json", "plate_metadata.json"):
+        p = plate_dir / name
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        fc = d.get("fluorescence_calibration") or {}
+        cal = (d.get("channel_calibrations") or fc.get("channel_calibrations")
+               or d.get("fl_calibrations") or fc.get("fl_calibrations") or {})
+        out = {ch: (v.get("p_low"), v.get("p_high")) for ch, v in cal.items()
+               if isinstance(v, dict) and v.get("p_low") is not None
+               and v.get("p_high") is not None}
+        if out:
+            return out
+    return {}
+
+
+def _discover_stacks(plate_dir: Path) -> dict:
+    """The manifest of a folder of per-position hyperstacks (see stacks.py).
+
+    Same shape as every other layout — wells, channels, frames per channel, z per
+    channel — so the grid, faders, annotations and prefetch need no special case.
+    Timepoints and z-slices are numbered from 1, as everywhere else in the app.
+    The extras (`native`, `px_um`, `well_labels`, `well_info`, `display`) are what a
+    stack has that a crop folder does not: a resolution worth zooming into, its own
+    pixel size, display names, and the per-channel display map in force."""
+    d = stacks.discover(plate_dir)
+    meta = d["meta"]
+    channels, det = d["channels"], d["detect_channel"]
+    cal = _plate_calibration(plate_dir)
+    ordered = sorted(d["wells"])
+    index, frames, n_frames, native, levels = {}, {}, {}, {}, {}
+    zs_by_ch: dict = {ch: set() for ch in channels}
+    for w in ordered:
+        sw = d["wells"][w]
+        full = sw.full
+        ci = d["chan_index"][w]
+        index[w] = {"stack": sw, "chan": ci, "cal": cal}
+        frames[w] = {ch: (list(range(1, full.T + 1)) if ch in ci else []) for ch in channels}
+        n_frames[w] = full.T
+        native[w] = [full.X, full.Y]
+        levels[w] = [[lv.X, lv.Y] for lv in sw.levels]
+        for ch in ci:
+            zs_by_ch[ch].update(range(1, full.Z + 1))
+    channel_z = {ch: sorted(zs_by_ch[ch]) for ch in channels}
+    # one pixel size / interval for the plate: the first well's full level (a plate
+    # whose positions disagree is reported per well in `native`; px_um is for µm)
+    first = d["wells"][ordered[0]].full if ordered else None
+    autofill = _plate_autofill(plate_dir)
+    if first is not None and not autofill.get("timepoint_interval_min") and first.dt_s:
+        autofill["timepoint_interval_min"] = round(first.dt_s / 60.0, 4)
+    display = {}
+    if first is not None:
+        for w in ordered:                         # any well tells the map per channel
+            sw = d["wells"][w]
+            for ch, c in d["chan_index"][w].items():
+                if ch in display:
+                    continue
+                if sw.full.itemsize == 1 and sw.full.dtype == "u1":
+                    display[ch] = {"source": "8-bit, shown as stored"}
+                elif ch in cal:
+                    display[ch] = {"lo": cal[ch][0], "hi": cal[ch][1], "source": "plate calibration"}
+                elif sw.full.ranges and c < len(sw.full.ranges):
+                    lo, hi = sw.full.ranges[c]
+                    display[ch] = {"lo": lo, "hi": hi, "source": "the file's own display range"}
+                else:
+                    display[ch] = {"source": "one map sampled from the stack, then fixed"}
+    winfo = {}
+    for w in ordered:                             # conditions etc., by id or short label
+        mw = (meta.get("wells") or {})
+        e = mw.get(w) or mw.get(d["labels"].get(w, "")) or {}
+        if isinstance(e, dict) and e:
+            winfo[w] = {k: e[k] for k in ("condition", "note", "label", "point") if e.get(k)}
+    return {
+        "plate": plate_dir.name,
+        "plate_dir": str(plate_dir),
+        "layout": "stacks",
+        "channels": channels,
+        "detect_channel": det,
+        "channel_z": channel_z,
+        "wells": ordered,
+        "frames": frames,
+        "n_frames": n_frames,
+        "z_slices": channel_z.get(det, []),
+        "autofill": autofill,
+        "native": native,                          # {well: [X, Y]} of the full level
+        "levels": levels,                          # {well: [[X, Y], ...]} largest first
+        "max_size": max([max(v) for v in native.values()] or [1024]),
+        "px_um": (first.px_um if first is not None else None),
+        "well_labels": d["labels"],
+        "well_info": winfo,
+        "display": display,
+        "skipped": d["skipped"],
+        "_well_index": index,
     }
 
 
